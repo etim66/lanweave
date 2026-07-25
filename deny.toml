@@ -30,5 +30,3 @@ allow-git = []
 [advisories]
 ignore = []
 yanked = "warn"
-unmaintained = "all"
-unsound = "all"

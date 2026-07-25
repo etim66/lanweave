@@ -6,10 +6,12 @@
 
 BIN        := lanweave
 CARGO      := cargo
+CARGO_AUDIT_VERSION := ^0.22
+CARGO_DENY_VERSION  := ^0.20
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build run test fmt fmt-check clippy clippy-strict audit deny check ci doc clean
+.PHONY: help build run test fmt fmt-check clippy clippy-strict audit deny ci-tools check ci doc clean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "Lanweave targets:\n"} \
@@ -43,9 +45,13 @@ audit: ## Run cargo audit (security advisories)
 deny: ## Run cargo deny (licenses, sources, bans)
 	$(CARGO) deny check
 
+ci-tools: ## Install CI-pinned cargo-audit and cargo-deny
+	cargo install --locked cargo-audit --version "$(CARGO_AUDIT_VERSION)"
+	cargo install --locked cargo-deny  --version "$(CARGO_DENY_VERSION)"
+
 check: fmt-check clippy-strict test ## Pre-push local gate (no audit/deny)
 
-ci: fmt-check clippy-strict test audit deny ## Full CI gate, locally
+ci: ci-tools fmt-check clippy-strict test audit deny ## Full CI gate, locally
 
 doc: ## Build documentation
 	$(CARGO) doc --all --locked --no-deps

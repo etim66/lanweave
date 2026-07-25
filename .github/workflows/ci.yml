@@ -49,8 +49,8 @@ jobs:
 
       - name: Install cargo-audit and cargo-deny
         run: |
-          cargo install --locked cargo-audit --version "^0.21"
-          cargo install --locked cargo-deny --version "^0.16"
+          cargo install --locked cargo-audit --version "^0.22"
+          cargo install --locked cargo-deny --version "^0.20"
 
       - name: cargo audit
         run: cargo audit
