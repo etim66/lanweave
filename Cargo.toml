@@ -1,0 +1,19 @@
+[package]
+name = "lanweave"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "TUI for local file transfer over an authorized LAN session"
+repository = "https://github.com/etim66/lanweave"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lanweave"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"

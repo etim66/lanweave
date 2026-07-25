@@ -1,8 +1,11 @@
 # Lanweave
 
+<!-- SPDX-FileCopyrightText: 2026 Unyime Etim -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 Lanweave is a planned terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
-This repository currently contains design documents only. Discovery, networking, security, file transfer, and the TUI have not been implemented.
+Lanweave is currently a work in progress. Discovery, networking, security, file transfer, and the TUI are being implemented according to `IMPLEMENTATION_PLAN.txt` and the design in `docs/`.
 
 ## How It Works
 
@@ -66,6 +69,21 @@ Likely dependency families include:
 
 The pairing library is not yet selected. Lanweave must not implement cryptographic group arithmetic itself. See [Cryptography](docs/CRYPTOGRAPHY.md) for the release-blocking security work.
 
+## Building
+
+Lanweave requires a stable Rust toolchain at or above MSRV 1.85. Common development commands:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all
+cargo run
+cargo audit
+cargo deny check
+```
+
+The CI workflow at `.github/workflows/ci.yml` runs the same checks on Linux, macOS, and Windows.
+
 ## Documentation
 
 | Document | Purpose |
@@ -94,4 +112,4 @@ Lanweave has not been implemented or audited. It is not safe for sensitive files
 
 Design feedback is welcome, especially when it identifies a broken security or state rule and includes a reproducible example.
 
-No project licence has been selected. Do not describe the repository as legally reusable until licence terms are published.
+Lanweave is licensed under the Apache License, Version 2.0. See [`LICENCE`](LICENCE) for the full text and [`NOTICE`](NOTICE) for attribution.
