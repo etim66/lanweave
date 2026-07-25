@@ -1,0 +1,34 @@
+# cargo-deny configuration for Lanweave.
+#
+# Policy is strict from PR 01. No temporary exception blocks. If a transitive
+# dependency surfaces a copyleft license, the fix is to swap the offending
+# crate, not to relax this file. See IMPLEMENTATION_PLAN.txt PR 01.
+
+[graph]
+all-features = false
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[advisories]
+ignore = []
+yanked = "warn"
+unmaintained = "all"
+unsound = "all"

@@ -45,3 +45,7 @@ criterion/
 # Generated documentation
 /doc/
 IMPLEMENTATION_PLAN.txt
+
+# Added by cargo
+
+/target

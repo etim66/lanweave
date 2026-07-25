@@ -2,7 +2,7 @@
 
 ## Status
 
-Lanweave is a documentation-only project. The planned application is a Rust terminal user interface for local file transfer. There is no working application yet.
+Lanweave is currently a work in progress. The application is a Rust terminal user interface for local file transfer. Discovery, networking, security, file transfer, and the TUI are being implemented.
 
 ## Product Model
 
