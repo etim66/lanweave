@@ -162,6 +162,8 @@ pub enum UserAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEvent {
     StartupCompleted,
+    Tick,
+    TerminalResized { width: u16, height: u16 },
     User(UserAction),
     IncomingPairingRequest,
     PairingSucceeded,

@@ -3,9 +3,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Unyime Etim -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-Lanweave is a planned terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
+Lanweave is a terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
-Lanweave is currently a work in progress. Discovery, networking, security, file transfer, and the TUI are being implemented according to `IMPLEMENTATION_PLAN.txt` and the design in `docs/`.
+Lanweave is currently a work in progress. The basic TUI shell is available, while discovery, networking, security, and file transfer are being implemented according to `IMPLEMENTATION_PLAN.txt` and the design in `docs/`.
 
 ## How It Works
 
@@ -27,6 +27,7 @@ Closing the session removes its temporary authorization. The users must repeat t
 The app is interactive rather than a set of one-shot shell commands.
 
 - Run `lanweave` to open the TUI.
+- Press `q` or Ctrl+C to close the current development build.
 - Enter `/` to see the commands available in the current screen.
 - Use `/devices` to open the list of devices currently running Lanweave.
 - Paste one or more file paths into the file area, review them, and select **Send**.
@@ -71,7 +72,7 @@ The pairing library is not yet selected. Lanweave must not implement cryptograph
 
 ## Building
 
-Lanweave requires a stable Rust toolchain at or above MSRV 1.85. Common development commands:
+Lanweave requires a stable Rust toolchain at or above MSRV 1.97. Common development commands:
 
 ```sh
 cargo fmt --all -- --check
@@ -106,7 +107,7 @@ The CI workflow at `.github/workflows/ci.yml` runs the same checks on Linux, mac
 
 ## Security Status
 
-Lanweave has not been implemented or audited. It is not safe for sensitive files. The planned pairing and TLS design still needs specialist review, test vectors, dependency review, and an audited RFC-conformant pairing implementation.
+Lanweave is incomplete and has not been audited. It is not safe for sensitive files. The planned pairing and TLS design still needs specialist review, test vectors, dependency review, and an audited RFC-conformant pairing implementation.
 
 ## Contributing And Licence
 
