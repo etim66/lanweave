@@ -13,41 +13,43 @@ pub use runtime::{
 };
 
 pub async fn run() -> anyhow::Result<()> {
+    let mut terminal = crate::tui::TerminalSession::start()?;
     let (event_sender, event_receiver) = event_channel();
-    let (effect_sender, mut effect_receiver) = effect_channel();
+    let (effect_sender, effect_receiver) = effect_channel();
+    let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
 
-    // PR 03 will replace these bootstrap events with terminal and signal input.
     event_sender.send(AppEvent::StartupCompleted).await?;
-    event_sender.send(AppEvent::ShutdownRequested).await?;
+    let input_sender = event_sender.clone();
     drop(event_sender);
 
-    let runtime = AppRuntime::new(event_receiver, effect_sender).run();
-    let effects = async move {
-        while let Some(effect) = effect_receiver.recv().await {
-            if effect == Effect::Shutdown {
-                return true;
-            }
-        }
-        false
-    };
-    let (model, shutdown_handled) = tokio::join!(runtime, effects);
-    let model = model?;
+    let input = tokio::spawn(crate::tui::run_events(input_sender, stop_receiver));
+    let effects = tokio::spawn(handle_effects(effect_receiver));
+
+    let runtime_result = AppRuntime::new(event_receiver, effect_sender)
+        .run_with_observer(|model| terminal.draw(model))
+        .await;
+    let _ = stop_sender.send(true);
+
+    let input_result = input.await?;
+    let shutdown_handled = effects.await?;
+    let restore_result = terminal.restore();
+
+    let model = runtime_result?;
+    input_result?;
+    restore_result?;
+
     if !shutdown_handled {
         anyhow::bail!("application effect handler stopped before shutdown");
     }
-
     debug_assert_eq!(model.state(), AppState::ShuttingDown);
-
-    println!("lanweave dev build: no TUI yet");
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::run;
-
-    #[tokio::test]
-    async fn run_returns_ok() {
-        assert!(run().await.is_ok());
+async fn handle_effects(mut effects: EffectReceiver) -> bool {
+    while let Some(effect) = effects.recv().await {
+        if effect == Effect::Shutdown {
+            return true;
+        }
     }
+    false
 }

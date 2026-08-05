@@ -6,13 +6,7 @@ use super::error::AppResult;
 use super::model::{AppEvent, AppModel, AppState, Effect};
 use super::reducer::{MAX_EFFECTS_PER_EVENT, update};
 
-/// Accommodates short input and discovery bursts without hiding sustained load.
-/// High-frequency replaceable events, such as ticks, should be coalesced by
-/// their producers rather than increasing this capacity.
 pub const APP_EVENT_CHANNEL_CAPACITY: usize = 32;
-
-/// Keeps effect handlers close enough to the reducer for backpressure to reach
-/// event producers before substantial work accumulates.
 pub const APP_EFFECT_CHANNEL_CAPACITY: usize = 16;
 
 pub type EventSender = mpsc::Sender<AppEvent>;
@@ -49,9 +43,34 @@ impl AppRuntime {
     ///
     /// Effect sends are awaited so a slow handler applies backpressure instead
     /// of allowing work to grow without a bound.
-    pub async fn run(mut self) -> AppResult<AppModel> {
+    pub async fn run(self) -> AppResult<AppModel> {
+        self.run_with_observer(|_| Ok(())).await
+    }
+
+    /// Runs the event loop and exposes immutable model snapshots to a view.
+    ///
+    /// The observer runs before the first event and after every reduction. This
+    /// guarantees that the shutdown view is drawn before terminal teardown.
+    pub async fn run_with_observer<F>(mut self, mut observe: F) -> AppResult<AppModel>
+    where
+        F: FnMut(&AppModel) -> AppResult<()>,
+    {
+        if let Err(error) = observe(&self.model) {
+            self.shutdown_after_observer_error().await;
+            return Err(error);
+        }
+
         while let Some(event) = self.events.recv().await {
-            self.apply(event).await?;
+            let effects = self.reduce(event);
+            if let Err(error) = observe(&self.model) {
+                if self.model.state() == AppState::ShuttingDown {
+                    let _ = self.send_effects(effects).await;
+                } else {
+                    self.shutdown_after_observer_error().await;
+                }
+                return Err(error);
+            }
+            self.send_effects(effects).await?;
 
             if self.model.state() == AppState::ShuttingDown {
                 return Ok(self.model);
@@ -59,14 +78,22 @@ impl AppRuntime {
         }
 
         // Losing every producer still follows the normal idempotent cleanup path.
-        self.apply(AppEvent::ShutdownRequested).await?;
+        let effects = self.reduce(AppEvent::ShutdownRequested);
+        if let Err(error) = observe(&self.model) {
+            let _ = self.send_effects(effects).await;
+            return Err(error);
+        }
+        self.send_effects(effects).await?;
         Ok(self.model)
     }
 
-    async fn apply(&mut self, event: AppEvent) -> AppResult<()> {
+    fn reduce(&mut self, event: AppEvent) -> Vec<Effect> {
         let effects = update(&mut self.model, event);
         debug_assert!(effects.len() <= MAX_EFFECTS_PER_EVENT);
+        effects
+    }
 
+    async fn send_effects(&self, effects: Vec<Effect>) -> AppResult<()> {
         for effect in effects {
             self.effects
                 .send(effect)
@@ -75,6 +102,11 @@ impl AppRuntime {
         }
 
         Ok(())
+    }
+
+    async fn shutdown_after_observer_error(&mut self) {
+        let effects = self.reduce(AppEvent::ShutdownRequested);
+        let _ = self.send_effects(effects).await;
     }
 }
 
@@ -216,6 +248,51 @@ mod tests {
         for _ in 1..APP_EFFECT_CHANNEL_CAPACITY {
             assert_eq!(effect_receiver.recv().await, Some(Effect::Disconnect));
         }
+        assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
+        assert_eq!(effect_receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn observer_sees_initial_browsing_and_shutdown_states() {
+        let (event_sender, event_receiver) = event_channel();
+        let (effect_sender, _effect_receiver) = effect_channel();
+        let mut observed = Vec::new();
+
+        event_sender.send(AppEvent::StartupCompleted).await.unwrap();
+        event_sender
+            .send(AppEvent::ShutdownRequested)
+            .await
+            .unwrap();
+
+        AppRuntime::new(event_receiver, effect_sender)
+            .run_with_observer(|model| {
+                observed.push(model.state());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            observed,
+            [
+                AppState::Starting,
+                AppState::Browsing,
+                AppState::ShuttingDown
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_error_stops_the_runtime() {
+        let (_event_sender, event_receiver) = event_channel();
+        let (effect_sender, mut effect_receiver) = effect_channel();
+
+        let error = AppRuntime::new(event_receiver, effect_sender)
+            .run_with_observer(|_| Err(anyhow::anyhow!("injected render failure")))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected render failure");
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
     }

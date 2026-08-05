@@ -359,6 +359,24 @@ mod tests {
     }
 
     #[test]
+    fn terminal_redraw_events_do_not_mutate_application_state() {
+        let mut model = model_in(AppState::Browsing);
+
+        assert!(update(&mut model, AppEvent::Tick).is_empty());
+        assert!(
+            update(
+                &mut model,
+                AppEvent::TerminalResized {
+                    width: 120,
+                    height: 40,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(model.state(), AppState::Browsing);
+    }
+
+    #[test]
     fn disconnect_uses_the_correct_closing_state_and_is_emitted_once() {
         let cases = [
             (AppState::PairingOutbound, AppState::ClosingPairing),
