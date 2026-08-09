@@ -15,7 +15,7 @@
 | DD-011 | Accepted | Sessions close manually or after 600 seconds of idle time. | Temporary authorization must not remain open without a clear limit. |
 | DD-012 | Accepted | Lanweave stores no trusted devices, reusable authorization, or TLS resume state. | Every new session must repeat user authorization. |
 | DD-013 | Accepted | JSON carries control messages; binary `DATA` frames carry file bytes. | JSON is easy to inspect and binary data avoids encoding overhead. |
-| DD-014 | Accepted | Start with one Rust binary crate and internal modules. | Crate boundaries should follow proven reuse or isolation needs. |
+| DD-014 | Accepted | Start with one Cargo package, a private library implementation, a thin binary, and internal modules. | Package boundaries should follow proven reuse or isolation needs. |
 | DD-015 | Research Gate | Approve the exact TLS, exporter, SPAKE2 composition, and pairing dependency before a security claim. | The design is experimental and cryptographic mistakes would be critical. |
 
 ## Deferred

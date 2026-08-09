@@ -2,7 +2,7 @@
 
 ## Initial Shape
 
-The first implementation is one Rust binary crate. Modules create clear internal boundaries without committing to public crate APIs.
+The first implementation is one Cargo package with a private library implementation and a thin binary entry point. Modules create clear internal boundaries without committing to public crate APIs.
 
 ```text
 main
@@ -17,7 +17,37 @@ main
 
 Suggested module names are `tui`, `app`, `command`, `discovery`, `session`, `protocol`, `framing`, `transport`, `pairing`, `transfer`, and `storage`.
 
-Keep one crate until reuse, platform isolation, dependency control, or independent fuzzing gives a clear reason to split it.
+Keep one package until reuse, platform isolation, dependency control, or independent fuzzing gives a clear reason to split it.
+
+## Implemented Shape
+
+The current shell uses this dependency direction:
+
+```text
+main -> public run facade -> bootstrap
+                              |-> app runtime and reducer
+                              |-> TUI input and rendering
+                              `-> service effect dispatch
+
+TUI -> app model, capabilities, and runtime channels
+app -/-> TUI or concrete adapters
+```
+
+`bootstrap` is the composition root. It creates the terminal, bounded channels,
+tasks, and shutdown supervision. `app/model.rs` contains domain-facing state;
+`app/interaction.rs` owns temporary UI state; and `tui/view/` contains focused
+rendering components. Networking modules remain placeholders until their
+adapters and ownership contracts are implemented.
+
+| Area | Owns | Must not own |
+| --- | --- | --- |
+| `bootstrap` | Construction, tasks, shutdown order | Domain policy or rendering |
+| `app` | User-visible state, actions, capabilities, reduction | Terminal or adapter APIs |
+| `tui` | Key mapping, interaction rendering, terminal lifecycle | Protocol and session policy |
+| `session` | Live connection authorization, proposals, timers | Terminal rendering |
+| `protocol` | Wire ordering and message validation | Sockets, files, or user consent |
+| `transport` | Bounded framed I/O | Authorization and consent policy |
+| `storage` | Safe names, temporary files, no-overwrite finalization | TUI or wire policy |
 
 ## Application Event Loop
 
@@ -56,6 +86,11 @@ TUI ----------> app/state <---------- discovery adapter
 ## Session Ownership
 
 One task owns each connection and its mutable session state. Reader, writer, file I/O, and timer tasks communicate with that owner through bounded channels.
+
+The application model receives a UI-safe snapshot of that state; it does not
+duplicate or mutate the live session state machine. Protocol validation owns
+wire-order rules, while the session owner decides connection lifecycle and
+publishes outcomes to the application loop.
 
 The owner enforces these rules:
 

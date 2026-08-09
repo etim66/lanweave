@@ -5,7 +5,10 @@ use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::app::{AppEvent, EventSender, FailureKind, UserAction};
+use crate::app::action::KeyInput;
+use crate::app::event::AppEvent;
+use crate::app::failure::FailureKind;
+use crate::app::runtime::EventSender;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 
@@ -93,15 +96,33 @@ fn map_key(key: KeyEvent) -> Option<AppEvent> {
             Some(AppEvent::ShutdownRequested)
         }
         KeyCode::Char(character)
-            if character.eq_ignore_ascii_case(&'q')
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            Some(AppEvent::User(UserAction::Quit))
+            Some(AppEvent::KeyInput(KeyInput::Character(character)))
+        }
+        KeyCode::Backspace if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Backspace))
+        }
+        KeyCode::Enter if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Enter))
+        }
+        KeyCode::Esc if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Escape))
+        }
+        KeyCode::Up if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Up))
+        }
+        KeyCode::Down if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Down))
         }
         _ => None,
     }
+}
+
+fn has_no_command_modifier(modifiers: KeyModifiers) -> bool {
+    !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 async fn send_shutdown(events: &EventSender) {
@@ -113,7 +134,9 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     use super::{map_key, map_terminal_event, send_tick};
-    use crate::app::{AppEvent, UserAction, event_channel};
+    use crate::app::action::KeyInput;
+    use crate::app::event::AppEvent;
+    use crate::app::runtime::event_channel;
 
     fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
         KeyEvent {
@@ -125,23 +148,19 @@ mod tests {
     }
 
     #[test]
-    fn quit_keys_map_to_shutdown_intent() {
+    fn text_keys_map_to_context_neutral_input() {
         let cases = [
             (
                 key(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press),
-                AppEvent::User(UserAction::Quit),
+                AppEvent::KeyInput(KeyInput::Character('q')),
             ),
             (
                 key(KeyCode::Char('Q'), KeyModifiers::SHIFT, KeyEventKind::Press),
-                AppEvent::User(UserAction::Quit),
+                AppEvent::KeyInput(KeyInput::Character('Q')),
             ),
             (
-                key(
-                    KeyCode::Char('c'),
-                    KeyModifiers::CONTROL,
-                    KeyEventKind::Press,
-                ),
-                AppEvent::ShutdownRequested,
+                key(KeyCode::Char('/'), KeyModifiers::NONE, KeyEventKind::Press),
+                AppEvent::KeyInput(KeyInput::Character('/')),
             ),
         ];
 
@@ -151,14 +170,46 @@ mod tests {
     }
 
     #[test]
+    fn editing_and_navigation_keys_are_forwarded() {
+        let cases = [
+            (KeyCode::Backspace, KeyInput::Backspace),
+            (KeyCode::Enter, KeyInput::Enter),
+            (KeyCode::Esc, KeyInput::Escape),
+            (KeyCode::Up, KeyInput::Up),
+            (KeyCode::Down, KeyInput::Down),
+        ];
+
+        for (code, input) in cases {
+            assert_eq!(
+                map_key(key(code, KeyModifiers::NONE, KeyEventKind::Press)),
+                Some(AppEvent::KeyInput(input))
+            );
+        }
+    }
+
+    #[test]
+    fn control_c_maps_to_shutdown_intent() {
+        assert_eq!(
+            map_key(key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+            Some(AppEvent::ShutdownRequested)
+        );
+    }
+
+    #[test]
     fn unrelated_and_non_press_keys_are_ignored() {
         let cases = [
-            key(KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press),
             key(
                 KeyCode::Char('q'),
                 KeyModifiers::CONTROL,
                 KeyEventKind::Press,
             ),
+            key(KeyCode::Char('x'), KeyModifiers::ALT, KeyEventKind::Press),
+            key(KeyCode::Enter, KeyModifiers::CONTROL, KeyEventKind::Press),
+            key(KeyCode::Down, KeyModifiers::ALT, KeyEventKind::Press),
             key(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Repeat),
             key(
                 KeyCode::Char('q'),

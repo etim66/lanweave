@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-This roadmap lists dependency gates. The detailed six-week and pull-request plan is in [IMPLEMENTATION_PLAN.txt](IMPLEMENTATION_PLAN.txt).
+This roadmap lists the implementation sequence and dependency gates. Completed work should be reflected here and in the implemented-architecture section of [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Gate 1: App And TUI Shell
 

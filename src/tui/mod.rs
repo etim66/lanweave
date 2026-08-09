@@ -8,5 +8,4 @@ mod terminal;
 mod view;
 
 pub(crate) use event::run_events;
-pub(crate) use terminal::TerminalSession;
-pub use terminal::install_panic_hook;
+pub(crate) use terminal::{TerminalSession, install_panic_hook};

@@ -1,6 +1,8 @@
 //! Synchronous application state transitions.
 
-use super::model::{AppEvent, AppModel, AppState, Effect, UserAction};
+use super::action::UserAction;
+use super::event::{AppEvent, Effect};
+use super::model::{AppModel, AppState};
 
 /// The maximum work one event may request.
 ///
@@ -13,10 +15,7 @@ pub const MAX_EFFECTS_PER_EVENT: usize = 1;
 /// Invalid or stale events are ignored. In particular, once shutdown starts no
 /// later queued event can revive the application or request additional work.
 pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
-    if matches!(
-        event,
-        AppEvent::ShutdownRequested | AppEvent::User(UserAction::Quit)
-    ) {
+    if event == AppEvent::ShutdownRequested {
         return begin_shutdown(model);
     }
 
@@ -24,26 +23,67 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
         return Vec::new();
     }
 
+    match event {
+        AppEvent::User(action) => apply_user_action(model, action),
+        AppEvent::KeyInput(_) => Vec::new(),
+        event => apply_service_event(model, event),
+    }
+}
+
+fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
+    if action == UserAction::Quit {
+        return begin_shutdown(model);
+    }
+
+    let effect = match (model.state(), action) {
+        (_, UserAction::ShowHelp | UserAction::ShowDevices) => None,
+        (AppState::Browsing, UserAction::SelectDevice(device)) => {
+            model.transition_to(AppState::PairingOutbound);
+            Some(Effect::Connect(device))
+        }
+        (AppState::PairingInbound, UserAction::AcceptPairing) => {
+            model.transition_to(AppState::PairingInboundAccepted);
+            Some(Effect::AcceptPairing)
+        }
+        (AppState::PairingInbound, UserAction::RejectPairing) => {
+            model.transition_to(AppState::ClosingPairing);
+            Some(Effect::RejectPairing)
+        }
+        (AppState::SessionIdle, UserAction::StartTransfer) => {
+            model.transition_to(AppState::OutboundProposal);
+            Some(Effect::StartTransfer)
+        }
+        (AppState::InboundProposal, UserAction::AcceptTransfer) => {
+            model.transition_to(AppState::InboundProposalAccepted);
+            Some(Effect::AcceptTransfer)
+        }
+        (AppState::InboundProposal, UserAction::RejectTransfer) => {
+            model.transition_to(AppState::SessionIdle);
+            Some(Effect::RejectTransfer)
+        }
+        (state, UserAction::Disconnect) if state.can_disconnect() => {
+            if state.is_pairing() {
+                model.transition_to(AppState::ClosingPairing);
+            } else {
+                model.transition_to(AppState::ClosingSession);
+            }
+            Some(Effect::Disconnect)
+        }
+        _ => None,
+    };
+
+    effect.into_iter().collect()
+}
+
+fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     let effect = match (model.state(), event) {
         (AppState::Starting, AppEvent::StartupCompleted) => {
             model.transition_to(AppState::Browsing);
             None
         }
-        (AppState::Browsing, AppEvent::User(UserAction::SelectDevice(device))) => {
-            model.transition_to(AppState::PairingOutbound);
-            Some(Effect::Connect(device))
-        }
         (AppState::Browsing, AppEvent::IncomingPairingRequest) => {
             model.transition_to(AppState::PairingInbound);
             None
-        }
-        (AppState::PairingInbound, AppEvent::User(UserAction::AcceptPairing)) => {
-            model.transition_to(AppState::PairingInboundAccepted);
-            Some(Effect::AcceptPairing)
-        }
-        (AppState::PairingInbound, AppEvent::User(UserAction::RejectPairing)) => {
-            model.transition_to(AppState::ClosingPairing);
-            Some(Effect::RejectPairing)
         }
         (
             AppState::PairingOutbound | AppState::PairingInboundAccepted,
@@ -56,10 +96,6 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.transition_to(AppState::Browsing);
             None
         }
-        (AppState::SessionIdle, AppEvent::User(UserAction::StartTransfer)) => {
-            model.transition_to(AppState::OutboundProposal);
-            Some(Effect::StartTransfer)
-        }
         (AppState::SessionIdle, AppEvent::IncomingTransferRequest) => {
             model.transition_to(AppState::InboundProposal);
             None
@@ -71,14 +107,6 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
         (AppState::OutboundProposal, AppEvent::ProposalRejected) => {
             model.transition_to(AppState::SessionIdle);
             None
-        }
-        (AppState::InboundProposal, AppEvent::User(UserAction::AcceptTransfer)) => {
-            model.transition_to(AppState::InboundProposalAccepted);
-            Some(Effect::AcceptTransfer)
-        }
-        (AppState::InboundProposal, AppEvent::User(UserAction::RejectTransfer)) => {
-            model.transition_to(AppState::SessionIdle);
-            Some(Effect::RejectTransfer)
         }
         (state, AppEvent::TransferFinished) if state.is_transfer_active() => {
             model.transition_to(AppState::SessionIdle);
@@ -94,18 +122,6 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
         }
         (state, AppEvent::IncomingPairingRequest) if state.is_pairing() || state.has_session() => {
             Some(Effect::RejectPairingBusy)
-        }
-        (state, AppEvent::User(UserAction::Disconnect))
-            if state.is_pairing() && state != AppState::ClosingPairing =>
-        {
-            model.transition_to(AppState::ClosingPairing);
-            Some(Effect::Disconnect)
-        }
-        (state, AppEvent::User(UserAction::Disconnect))
-            if state.has_session() && state != AppState::ClosingSession =>
-        {
-            model.transition_to(AppState::ClosingSession);
-            Some(Effect::Disconnect)
         }
         (state, AppEvent::SessionClosed) if state.is_pairing() || state.has_session() => {
             model.transition_to(AppState::Browsing);
@@ -133,9 +149,10 @@ fn begin_shutdown(model: &mut AppModel) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_EFFECTS_PER_EVENT, update};
-    use crate::app::model::{
-        AppEvent, AppModel, AppState, DeviceId, Effect, FailureKind, UserAction,
-    };
+    use crate::app::action::{DeviceId, UserAction};
+    use crate::app::event::{AppEvent, Effect};
+    use crate::app::failure::FailureKind;
+    use crate::app::model::{AppModel, AppState};
 
     const DEVICE: DeviceId = DeviceId::new(7);
 

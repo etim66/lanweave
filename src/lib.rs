@@ -1,16 +1,25 @@
-//! Lanweave library crate. The binary in `src/main.rs` is a thin wrapper
-//! around [`app::run`]. Modules are split per `docs/ARCHITECTURE.md` and
-//! `IMPLEMENTATION_PLAN.txt`. Each module starts as a placeholder and
-//! gains behavior as features are added.
+//! Lanweave application library.
+//!
+//! The executable uses the small [`run`] facade. Implementation modules stay
+//! private so their boundaries can evolve without creating an accidental API.
 
-pub mod app;
-pub mod command;
-pub mod discovery;
-pub mod framing;
-pub mod pairing;
-pub mod protocol;
-pub mod session;
-pub mod storage;
-pub mod transfer;
-pub mod transport;
-pub mod tui;
+mod app;
+mod bootstrap;
+mod discovery;
+mod framing;
+mod pairing;
+mod protocol;
+mod session;
+mod storage;
+mod transfer;
+mod transport;
+mod tui;
+
+/// Starts Lanweave and runs it until shutdown completes.
+pub fn run() -> anyhow::Result<()> {
+    tui::install_panic_hook();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(bootstrap::run())
+}
