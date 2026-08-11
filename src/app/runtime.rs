@@ -3,7 +3,9 @@
 use tokio::sync::mpsc;
 
 use super::error::AppResult;
-use super::model::{AppEvent, AppModel, AppState, Effect};
+use super::event::{AppEvent, Effect};
+use super::interaction::{self, UiState};
+use super::model::{AppModel, AppState};
 use super::reducer::{MAX_EFFECTS_PER_EVENT, update};
 
 pub const APP_EVENT_CHANNEL_CAPACITY: usize = 32;
@@ -26,6 +28,7 @@ pub fn effect_channel() -> (EffectSender, EffectReceiver) {
 /// application model.
 pub struct AppRuntime {
     model: AppModel,
+    ui: UiState,
     events: EventReceiver,
     effects: EffectSender,
 }
@@ -34,6 +37,7 @@ impl AppRuntime {
     pub fn new(events: EventReceiver, effects: EffectSender) -> Self {
         Self {
             model: AppModel::new(),
+            ui: UiState::default(),
             events,
             effects,
         }
@@ -43,8 +47,9 @@ impl AppRuntime {
     ///
     /// Effect sends are awaited so a slow handler applies backpressure instead
     /// of allowing work to grow without a bound.
+    #[cfg(test)]
     pub async fn run(self) -> AppResult<AppModel> {
-        self.run_with_observer(|_| Ok(())).await
+        self.run_with_observer(|_, _| Ok(())).await
     }
 
     /// Runs the event loop and exposes immutable model snapshots to a view.
@@ -53,16 +58,16 @@ impl AppRuntime {
     /// guarantees that the shutdown view is drawn before terminal teardown.
     pub async fn run_with_observer<F>(mut self, mut observe: F) -> AppResult<AppModel>
     where
-        F: FnMut(&AppModel) -> AppResult<()>,
+        F: FnMut(&AppModel, &UiState) -> AppResult<()>,
     {
-        if let Err(error) = observe(&self.model) {
+        if let Err(error) = observe(&self.model, &self.ui) {
             self.shutdown_after_observer_error().await;
             return Err(error);
         }
 
         while let Some(event) = self.events.recv().await {
             let effects = self.reduce(event);
-            if let Err(error) = observe(&self.model) {
+            if let Err(error) = observe(&self.model, &self.ui) {
                 if self.model.state() == AppState::ShuttingDown {
                     let _ = self.send_effects(effects).await;
                 } else {
@@ -79,7 +84,7 @@ impl AppRuntime {
 
         // Losing every producer still follows the normal idempotent cleanup path.
         let effects = self.reduce(AppEvent::ShutdownRequested);
-        if let Err(error) = observe(&self.model) {
+        if let Err(error) = observe(&self.model, &self.ui) {
             let _ = self.send_effects(effects).await;
             return Err(error);
         }
@@ -88,9 +93,32 @@ impl AppRuntime {
     }
 
     fn reduce(&mut self, event: AppEvent) -> Vec<Effect> {
-        let effects = update(&mut self.model, event);
+        let effects = match event {
+            AppEvent::KeyInput(input) => {
+                match interaction::apply_key_input(&self.model, &mut self.ui, input) {
+                    Some(action) => self.apply_user_action(action),
+                    None => Vec::new(),
+                }
+            }
+            AppEvent::User(action) => self.apply_user_action(action),
+            event => update(&mut self.model, event),
+        };
+
+        if self.model.state() == AppState::ShuttingDown {
+            self.ui.clear();
+        } else {
+            interaction::reconcile(&self.model, &mut self.ui);
+        }
         debug_assert!(effects.len() <= MAX_EFFECTS_PER_EVENT);
         effects
+    }
+
+    fn apply_user_action(&mut self, action: super::action::UserAction) -> Vec<Effect> {
+        if interaction::apply_user_action(&mut self.ui, action) {
+            Vec::new()
+        } else {
+            update(&mut self.model, AppEvent::User(action))
+        }
     }
 
     async fn send_effects(&self, effects: Vec<Effect>) -> AppResult<()> {
@@ -118,7 +146,9 @@ mod tests {
         APP_EFFECT_CHANNEL_CAPACITY, APP_EVENT_CHANNEL_CAPACITY, AppRuntime, effect_channel,
         event_channel,
     };
-    use crate::app::model::{AppEvent, AppState, DeviceId, Effect, UserAction};
+    use crate::app::action::{DeviceId, KeyInput, UserAction};
+    use crate::app::event::{AppEvent, Effect};
+    use crate::app::model::AppState;
 
     #[test]
     fn event_channel_is_bounded() {
@@ -199,6 +229,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn palette_quit_uses_the_application_shutdown_path() {
+        let (event_sender, event_receiver) = event_channel();
+        let (effect_sender, mut effect_receiver) = effect_channel();
+
+        event_sender.send(AppEvent::StartupCompleted).await.unwrap();
+        for input in [
+            KeyInput::Character('/'),
+            KeyInput::Character('q'),
+            KeyInput::Character('u'),
+            KeyInput::Character('i'),
+            KeyInput::Character('t'),
+            KeyInput::Enter,
+        ] {
+            event_sender.send(AppEvent::KeyInput(input)).await.unwrap();
+        }
+        drop(event_sender);
+
+        let model = AppRuntime::new(event_receiver, effect_sender)
+            .run()
+            .await
+            .unwrap();
+
+        assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
+        assert_eq!(effect_receiver.recv().await, None);
+    }
+
+    #[tokio::test]
     async fn queued_work_after_shutdown_is_not_processed() {
         let (event_sender, event_receiver) = event_channel();
         let (effect_sender, mut effect_receiver) = effect_channel();
@@ -265,7 +323,7 @@ mod tests {
             .unwrap();
 
         AppRuntime::new(event_receiver, effect_sender)
-            .run_with_observer(|model| {
+            .run_with_observer(|model, _| {
                 observed.push(model.state());
                 Ok(())
             })
@@ -288,7 +346,7 @@ mod tests {
         let (effect_sender, mut effect_receiver) = effect_channel();
 
         let error = AppRuntime::new(event_receiver, effect_sender)
-            .run_with_observer(|_| Err(anyhow::anyhow!("injected render failure")))
+            .run_with_observer(|_, _| Err(anyhow::anyhow!("injected render failure")))
             .await
             .unwrap_err();
 

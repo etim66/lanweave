@@ -1,32 +1,6 @@
 //! Plain application state and messages shared by the event loop and adapters.
 
-/// Identifies a discovery candidate without exposing adapter-specific data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceId(u64);
-
-impl DeviceId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// Safe error categories suitable for application state and user-facing views.
-///
-/// Detailed errors remain local to the failing adapter so paths, peer input, and
-/// other sensitive diagnostics do not accidentally reach the model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureKind {
-    Startup,
-    Connection,
-    Pairing,
-    Session,
-    Transfer,
-    Internal,
-}
+use super::failure::FailureKind;
 
 /// The authoritative top-level application state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +23,25 @@ pub enum AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
+    pub const ALL: [Self; 15] = [
+        Self::Starting,
+        Self::Browsing,
+        Self::PairingOutbound,
+        Self::PairingInbound,
+        Self::PairingInboundAccepted,
+        Self::ClosingPairing,
+        Self::SessionIdle,
+        Self::OutboundProposal,
+        Self::InboundProposal,
+        Self::InboundProposalAccepted,
+        Self::TransferringOutbound,
+        Self::TransferringInbound,
+        Self::ClosingSession,
+        Self::Error(FailureKind::Internal),
+        Self::ShuttingDown,
+    ];
+
     pub const fn is_pairing(self) -> bool {
         matches!(
             self,
@@ -75,6 +68,23 @@ impl AppState {
     pub const fn is_transfer_active(self) -> bool {
         matches!(self, Self::TransferringOutbound | Self::TransferringInbound)
     }
+
+    pub const fn can_disconnect(self) -> bool {
+        (self.is_pairing() && !matches!(self, Self::ClosingPairing))
+            || (self.has_session() && !matches!(self, Self::ClosingSession))
+    }
+}
+
+/// Narrow application capabilities consumed by interaction adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppCapabilities {
+    pub(crate) accepts_commands: bool,
+    pub(crate) can_show_devices: bool,
+    pub(crate) can_start_transfer: bool,
+    pub(crate) transfer_unavailable: bool,
+    pub(crate) session_closing: bool,
+    pub(crate) can_disconnect: bool,
+    pub(crate) disconnecting: bool,
 }
 
 /// Renderable screen derived from [`AppState`].
@@ -134,8 +144,26 @@ impl AppModel {
         self.state.into()
     }
 
+    pub(crate) fn capabilities(&self) -> AppCapabilities {
+        let state = self.state;
+        AppCapabilities {
+            accepts_commands: state != AppState::ShuttingDown,
+            can_show_devices: state == AppState::Browsing,
+            can_start_transfer: state == AppState::SessionIdle,
+            transfer_unavailable: state.has_session() && state != AppState::SessionIdle,
+            session_closing: state == AppState::ClosingSession,
+            can_disconnect: state.can_disconnect(),
+            disconnecting: matches!(state, AppState::ClosingPairing | AppState::ClosingSession),
+        }
+    }
+
     pub(super) fn transition_to(&mut self, state: AppState) {
         self.state = state;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(state: AppState) -> Self {
+        Self { state }
     }
 }
 
@@ -145,55 +173,10 @@ impl Default for AppModel {
     }
 }
 
-/// User intent produced by the TUI or command registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UserAction {
-    SelectDevice(DeviceId),
-    AcceptPairing,
-    RejectPairing,
-    StartTransfer,
-    AcceptTransfer,
-    RejectTransfer,
-    Disconnect,
-    Quit,
-}
-
-/// Inputs consumed by the application reducer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppEvent {
-    StartupCompleted,
-    Tick,
-    TerminalResized { width: u16, height: u16 },
-    User(UserAction),
-    IncomingPairingRequest,
-    PairingSucceeded,
-    PairingEnded,
-    IncomingTransferRequest,
-    TransferStarted,
-    ProposalRejected,
-    TransferFinished,
-    SessionClosed,
-    Failed(FailureKind),
-    ShutdownRequested,
-}
-
-/// Side effects requested by the reducer and executed outside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Effect {
-    Connect(DeviceId),
-    AcceptPairing,
-    RejectPairing,
-    RejectPairingBusy,
-    StartTransfer,
-    AcceptTransfer,
-    RejectTransfer,
-    Disconnect,
-    Shutdown,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AppModel, AppState, FailureKind, Screen};
+    use super::{AppModel, AppState, Screen};
+    use crate::app::failure::FailureKind;
 
     #[test]
     fn model_starts_on_starting_screen() {

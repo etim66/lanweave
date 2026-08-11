@@ -5,7 +5,7 @@
 
 Lanweave is a terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
-Lanweave is currently a work in progress. The basic TUI shell is available, while discovery, networking, security, and file transfer are being implemented according to `IMPLEMENTATION_PLAN.txt` and the design in `docs/`.
+Lanweave is currently a work in progress. The basic TUI shell is available, while discovery, networking, security, and file transfer are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
 
 ## How It Works
 
@@ -27,11 +27,14 @@ Closing the session removes its temporary authorization. The users must repeat t
 The app is interactive rather than a set of one-shot shell commands.
 
 - Run `lanweave` to open the TUI.
-- Press `q` or Ctrl+C to close the current development build.
-- Enter `/` to see the commands available in the current screen.
+- Press `q` outside the command palette, or Ctrl+C anywhere, to close Lanweave.
+- Enter `/` to open the command palette. Type to filter, use Up/Down to select,
+  Enter to run a command, Backspace to edit, and Escape to close it.
+- Use `/help` to show command and keyboard help.
 - Use `/devices` to open the list of devices currently running Lanweave.
 - Paste one or more file paths into the file area, review them, and select **Send**.
-- Use `/disconnect` to close the current session and `/quit` to close Lanweave.
+- `/send` is available only in an authorized idle session. `/disconnect` is
+  available only while connected, and `/quit` closes Lanweave.
 
 The exact command names may change during implementation, but `/` will always show the available actions.
 
@@ -55,7 +58,7 @@ Directories, resume, parallel file transfer, compression, overwrite or rename ne
 
 ## Technical Shape
 
-The first implementation will be one Rust binary crate. Suggested modules are `tui`, `app`, `session`, `protocol`, `framing`, `transport`, `pairing`, `transfer`, `storage`, and `discovery`.
+The first implementation is one Cargo package with a private library implementation and a thin binary entry point. Internal modules are `bootstrap`, `tui`, `app`, `session`, `protocol`, `framing`, `transport`, `pairing`, `transfer`, `storage`, and `discovery`.
 
 Likely dependency families include:
 
@@ -76,14 +79,14 @@ Lanweave requires a stable Rust toolchain at or above MSRV 1.97. Common developm
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all
-cargo run
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all --locked
+cargo run --locked
 cargo audit
 cargo deny check
 ```
 
-The CI workflow at `.github/workflows/ci.yml` runs the same checks on Linux, macOS, and Windows.
+Run `make check` for the formatting, lint, and test gate used during normal development. The CI workflow at `.github/workflows/ci.yml` runs the same checks on Linux, macOS, and Windows.
 
 ## Documentation
 
@@ -111,6 +114,6 @@ Lanweave is incomplete and has not been audited. It is not safe for sensitive fi
 
 ## Contributing And Licence
 
-Design feedback is welcome, especially when it identifies a broken security or state rule and includes a reproducible example.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow and module ownership guide. Design feedback is especially useful when it identifies a broken security or state rule and includes a reproducible example.
 
 Lanweave is licensed under the Apache License, Version 2.0. See [`LICENCE`](LICENCE) for the full text and [`NOTICE`](NOTICE) for attribution.

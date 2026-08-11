@@ -1,60 +1,15 @@
-use std::io::{self, Stdout};
-use std::panic;
-use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io;
+use std::sync::atomic::Ordering;
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
-use crate::app::AppModel;
+use super::TERMINAL_ACTIVE;
 
-use super::view;
-
-static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
-static INSTALL_PANIC_HOOK: Once = Once::new();
-
-/// Installs process-wide best-effort terminal restoration before panic output.
-pub fn install_panic_hook() {
-    INSTALL_PANIC_HOOK.call_once(|| {
-        let previous = panic::take_hook();
-        panic::set_hook(Box::new(move |panic_info| {
-            restore_after_panic();
-            previous(panic_info);
-        }));
-    });
-}
-
-pub(crate) struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    guard: TerminalGuard<CrosstermControl>,
-}
-
-impl TerminalSession {
-    pub(crate) fn start() -> io::Result<Self> {
-        let guard = TerminalGuard::start(CrosstermControl, true)?;
-        let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        Ok(Self { terminal, guard })
-    }
-
-    pub(crate) fn draw(&mut self, model: &AppModel) -> anyhow::Result<()> {
-        if !TERMINAL_ACTIVE.load(Ordering::SeqCst) {
-            anyhow::bail!("terminal session is no longer active");
-        }
-        self.terminal.draw(|frame| view::render(frame, model))?;
-        Ok(())
-    }
-
-    pub(crate) fn restore(&mut self) -> io::Result<()> {
-        self.guard.restore()
-    }
-}
-
-trait TerminalControl {
+pub(super) trait TerminalControl {
     fn enable_raw(&mut self) -> io::Result<()>;
     fn enter_alternate_screen(&mut self) -> io::Result<()>;
     fn hide_cursor(&mut self) -> io::Result<()>;
@@ -63,7 +18,7 @@ trait TerminalControl {
     fn disable_raw(&mut self) -> io::Result<()>;
 }
 
-struct CrosstermControl;
+pub(super) struct CrosstermControl;
 
 impl TerminalControl for CrosstermControl {
     fn enable_raw(&mut self) -> io::Result<()> {
@@ -91,7 +46,7 @@ impl TerminalControl for CrosstermControl {
     }
 }
 
-struct TerminalGuard<C: TerminalControl> {
+pub(super) struct TerminalGuard<C: TerminalControl> {
     control: C,
     raw: bool,
     alternate_screen: bool,
@@ -100,7 +55,7 @@ struct TerminalGuard<C: TerminalControl> {
 }
 
 impl<C: TerminalControl> TerminalGuard<C> {
-    fn start(control: C, marks_process_active: bool) -> io::Result<Self> {
+    pub(super) fn start(control: C, marks_process_active: bool) -> io::Result<Self> {
         let mut guard = Self {
             control,
             raw: false,
@@ -122,7 +77,7 @@ impl<C: TerminalControl> TerminalGuard<C> {
         Ok(guard)
     }
 
-    fn restore(&mut self) -> io::Result<()> {
+    pub(super) fn restore(&mut self) -> io::Result<()> {
         let mut first_error = None;
         if self.cursor_hidden {
             match self.control.show_cursor() {
@@ -162,17 +117,6 @@ fn remember_first_error(first_error: &mut Option<io::Error>, error: io::Error) {
     if first_error.is_none() {
         *first_error = Some(error);
     }
-}
-
-fn restore_after_panic() {
-    if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
-        return;
-    }
-
-    // Each step is independent so one failed write cannot skip raw-mode cleanup.
-    let _ = execute!(io::stdout(), Show);
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    let _ = disable_raw_mode();
 }
 
 #[cfg(test)]
