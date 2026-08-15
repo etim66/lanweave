@@ -2,14 +2,16 @@
 
 use super::action::{DeviceId, KeyInput, UserAction};
 use super::failure::FailureKind;
+use crate::discovery::DiscoveryEvent;
 
 /// Inputs consumed by the application runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum AppEvent {
     StartupCompleted,
     Tick,
     TerminalResized { width: u16, height: u16 },
+    Discovery(DiscoveryEvent),
     KeyInput(KeyInput),
     User(UserAction),
     IncomingPairingRequest,

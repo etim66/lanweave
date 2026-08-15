@@ -141,6 +141,7 @@ impl AppRuntime {
 #[cfg(test)]
 mod tests {
     use tokio::sync::mpsc::error::TrySendError;
+    use tokio::time::Instant;
 
     use super::{
         APP_EFFECT_CHANNEL_CAPACITY, APP_EVENT_CHANNEL_CAPACITY, AppRuntime, effect_channel,
@@ -149,6 +150,7 @@ mod tests {
     use crate::app::action::{DeviceId, KeyInput, UserAction};
     use crate::app::event::{AppEvent, Effect};
     use crate::app::model::AppState;
+    use crate::discovery::{DiscoveredService, DiscoveryEvent};
 
     #[test]
     fn event_channel_is_bounded() {
@@ -338,6 +340,34 @@ mod tests {
                 AppState::ShuttingDown
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn observer_sees_discovery_candidate_updates() {
+        let (event_sender, event_receiver) = event_channel();
+        let (effect_sender, _effect_receiver) = effect_channel();
+        let mut observed_counts = Vec::new();
+
+        event_sender
+            .send(AppEvent::Discovery(DiscoveryEvent::Resolved(
+                DiscoveredService::for_test("peer", Instant::now()),
+            )))
+            .await
+            .unwrap();
+        event_sender
+            .send(AppEvent::ShutdownRequested)
+            .await
+            .unwrap();
+
+        AppRuntime::new(event_receiver, effect_sender)
+            .run_with_observer(|model, _| {
+                observed_counts.push(model.candidates().len());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(observed_counts, [0, 1, 1]);
     }
 
     #[tokio::test]

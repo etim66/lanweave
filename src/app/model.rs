@@ -1,6 +1,7 @@
 //! Plain application state and messages shared by the event loop and adapters.
 
 use super::failure::FailureKind;
+use crate::discovery::{Candidate, CandidateStore, DiscoveryEvent};
 
 /// The authoritative top-level application state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,12 +128,14 @@ impl From<AppState> for Screen {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
     state: AppState,
+    candidates: CandidateStore,
 }
 
 impl AppModel {
     pub const fn new() -> Self {
         Self {
             state: AppState::Starting,
+            candidates: CandidateStore::new(),
         }
     }
 
@@ -142,6 +145,11 @@ impl AppModel {
 
     pub fn screen(&self) -> Screen {
         self.state.into()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn candidates(&self) -> &[Candidate] {
+        self.candidates.candidates()
     }
 
     pub(crate) fn capabilities(&self) -> AppCapabilities {
@@ -161,9 +169,16 @@ impl AppModel {
         self.state = state;
     }
 
+    pub(super) fn apply_discovery(&mut self, event: DiscoveryEvent) {
+        self.candidates.apply(event);
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            candidates: CandidateStore::new(),
+        }
     }
 }
 

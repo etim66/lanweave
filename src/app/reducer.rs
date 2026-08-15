@@ -15,7 +15,7 @@ pub const MAX_EFFECTS_PER_EVENT: usize = 1;
 /// Invalid or stale events are ignored. In particular, once shutdown starts no
 /// later queued event can revive the application or request additional work.
 pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
-    if event == AppEvent::ShutdownRequested {
+    if matches!(event, AppEvent::ShutdownRequested) {
         return begin_shutdown(model);
     }
 
@@ -24,6 +24,10 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     }
 
     match event {
+        AppEvent::Discovery(event) => {
+            model.apply_discovery(event);
+            Vec::new()
+        }
         AppEvent::User(action) => apply_user_action(model, action),
         AppEvent::KeyInput(_) => Vec::new(),
         event => apply_service_event(model, event),
@@ -148,11 +152,14 @@ fn begin_shutdown(model: &mut AppModel) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::Instant;
+
     use super::{MAX_EFFECTS_PER_EVENT, update};
     use crate::app::action::{DeviceId, UserAction};
     use crate::app::event::{AppEvent, Effect};
     use crate::app::failure::FailureKind;
     use crate::app::model::{AppModel, AppState};
+    use crate::discovery::{DiscoveredService, DiscoveryEvent};
 
     const DEVICE: DeviceId = DeviceId::new(7);
 
@@ -295,7 +302,7 @@ mod tests {
 
         for (initial, event, expected_state, expected_effect) in cases {
             let mut model = model_in(initial);
-            let effects = update(&mut model, event);
+            let effects = update(&mut model, event.clone());
 
             assert_eq!(model.state(), expected_state, "event: {event:?}");
             assert_eq!(effects, expected_effect.into_iter().collect::<Vec<_>>());
@@ -391,6 +398,66 @@ mod tests {
             .is_empty()
         );
         assert_eq!(model.state(), AppState::Browsing);
+    }
+
+    #[test]
+    fn discovery_updates_candidates_without_changing_application_state() {
+        for state in all_states() {
+            if state == AppState::ShuttingDown {
+                continue;
+            }
+
+            let mut model = model_in(state);
+            let effects = update(
+                &mut model,
+                AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                    "peer",
+                    Instant::now(),
+                ))),
+            );
+
+            assert!(effects.is_empty(), "state: {state:?}");
+            assert_eq!(model.state(), state);
+            assert_eq!(model.candidates().len(), 1);
+        }
+    }
+
+    #[test]
+    fn discovery_removal_does_not_close_an_active_session() {
+        let mut model = model_in(AppState::SessionIdle);
+        let service = DiscoveredService::for_test("peer", Instant::now());
+        update(
+            &mut model,
+            AppEvent::Discovery(DiscoveryEvent::Resolved(service)),
+        );
+
+        let effects = update(
+            &mut model,
+            AppEvent::Discovery(DiscoveryEvent::Removed {
+                service_instance: "peer._lanweave._tcp.local.".to_owned(),
+            }),
+        );
+
+        assert!(effects.is_empty());
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.candidates().is_empty());
+    }
+
+    #[test]
+    fn shutdown_ignores_queued_discovery_updates() {
+        let mut model = model_in(AppState::ShuttingDown);
+
+        assert!(
+            update(
+                &mut model,
+                AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                    "peer",
+                    Instant::now(),
+                ))),
+            )
+            .is_empty()
+        );
+        assert!(model.candidates().is_empty());
     }
 
     #[test]
