@@ -357,6 +357,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "fastrand",
  "futures-util",
  "mdns-sd",
  "ratatui",
@@ -883,6 +884,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "signal-hook-registry",
+ "socket2",
  "tokio-macros",
  "windows-sys",
 ]
