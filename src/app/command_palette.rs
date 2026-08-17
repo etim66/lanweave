@@ -21,7 +21,7 @@ pub(crate) enum CommandAvailability {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CommandSpec {
     pub(crate) id: CommandId,
     pub(crate) name: &'static str,
@@ -137,7 +137,7 @@ pub(crate) fn resolve(
         .into_iter()
         .find(|command| command.id == selected)
         .filter(|command| (command.availability)(capabilities) == CommandAvailability::Enabled)
-        .map(|command| command.action)
+        .map(|command| command.action.clone())
 }
 
 fn always_available(capabilities: AppCapabilities) -> CommandAvailability {

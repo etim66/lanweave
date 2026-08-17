@@ -1,6 +1,6 @@
 //! Runtime inputs and application-requested work.
 
-use super::action::{DeviceId, KeyInput, UserAction};
+use super::action::{ConnectionTarget, KeyInput, UserAction};
 use super::failure::FailureKind;
 use crate::discovery::DiscoveryEvent;
 
@@ -27,9 +27,9 @@ pub(crate) enum AppEvent {
 }
 
 /// Side effects requested by the reducer and executed outside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
-    Connect(DeviceId),
+    Connect(ConnectionTarget),
     AcceptPairing,
     RejectPairing,
     RejectPairingBusy,

@@ -114,7 +114,7 @@ impl AppRuntime {
     }
 
     fn apply_user_action(&mut self, action: super::action::UserAction) -> Vec<Effect> {
-        if interaction::apply_user_action(&mut self.ui, action) {
+        if interaction::apply_user_action(&mut self.ui, action.clone()) {
             Vec::new()
         } else {
             update(&mut self.model, AppEvent::User(action))
@@ -208,7 +208,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(model.state(), AppState::ShuttingDown);
-        assert_eq!(effect_receiver.recv().await, Some(Effect::Connect(device)));
+        assert_eq!(
+            effect_receiver.recv().await,
+            Some(Effect::Connect(
+                crate::app::action::ConnectionTarget::Discovered(device)
+            ))
+        );
         assert_eq!(effect_receiver.recv().await, Some(Effect::StartTransfer));
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);

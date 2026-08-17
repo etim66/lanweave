@@ -1,6 +1,6 @@
 //! Synchronous application state transitions.
 
-use super::action::UserAction;
+use super::action::{ConnectionTarget, UserAction};
 use super::event::{AppEvent, Effect};
 use super::model::{AppModel, AppState};
 
@@ -43,7 +43,11 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
         (_, UserAction::ShowHelp | UserAction::ShowDevices) => None,
         (AppState::Browsing, UserAction::SelectDevice(device)) => {
             model.transition_to(AppState::PairingOutbound);
-            Some(Effect::Connect(device))
+            Some(Effect::Connect(ConnectionTarget::Discovered(device)))
+        }
+        (AppState::Browsing, UserAction::ConnectDirect(endpoint)) => {
+            model.transition_to(AppState::PairingOutbound);
+            Some(Effect::Connect(ConnectionTarget::Direct(endpoint)))
         }
         (AppState::PairingInbound, UserAction::AcceptPairing) => {
             model.transition_to(AppState::PairingInboundAccepted);
@@ -155,7 +159,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{MAX_EFFECTS_PER_EVENT, update};
-    use crate::app::action::{DeviceId, UserAction};
+    use crate::app::action::{ConnectionTarget, DeviceId, DirectEndpoint, UserAction};
     use crate::app::event::{AppEvent, Effect};
     use crate::app::failure::FailureKind;
     use crate::app::model::{AppModel, AppState};
@@ -182,7 +186,7 @@ mod tests {
                 AppState::Browsing,
                 AppEvent::User(UserAction::SelectDevice(DEVICE)),
                 AppState::PairingOutbound,
-                Some(Effect::Connect(DEVICE)),
+                Some(Effect::Connect(ConnectionTarget::Discovered(DEVICE))),
             ),
             (
                 AppState::Browsing,
@@ -326,6 +330,33 @@ mod tests {
     }
 
     #[test]
+    fn direct_address_uses_the_same_connection_entry_point() {
+        let endpoint = DirectEndpoint::new("peer.local".to_owned(), 4242).unwrap();
+        assert_eq!(endpoint.host(), "peer.local");
+        assert_eq!(endpoint.port(), 4242);
+        let mut model = model_in(AppState::Browsing);
+
+        assert_eq!(
+            update(
+                &mut model,
+                AppEvent::User(UserAction::ConnectDirect(endpoint.clone())),
+            ),
+            vec![Effect::Connect(ConnectionTarget::Direct(endpoint))]
+        );
+        assert_eq!(model.state(), AppState::PairingOutbound);
+
+        assert!(DirectEndpoint::new(String::new(), 4242).is_none());
+        assert!(DirectEndpoint::new("peer".to_owned(), 0).is_none());
+        assert!(
+            DirectEndpoint::new(
+                "x".repeat(crate::app::action::MAX_DIRECT_HOST_BYTES + 1),
+                4242,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn transfer_only_starts_from_an_idle_session() {
         for state in all_states() {
             if state == AppState::SessionIdle {
@@ -356,7 +387,7 @@ mod tests {
                 }
 
                 let mut model = model_in(state);
-                let effects = update(&mut model, AppEvent::User(action));
+                let effects = update(&mut model, AppEvent::User(action.clone()));
 
                 assert_eq!(model.state(), state, "action: {action:?}, state: {state:?}");
                 assert!(effects.is_empty(), "action: {action:?}, state: {state:?}");

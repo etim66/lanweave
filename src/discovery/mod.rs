@@ -4,6 +4,7 @@
 //! prove identity or authorize a connection. The adapter trait and candidate
 //! store live here, and the local listener is bound before advertising.
 
+mod listener;
 mod mdns;
 mod store;
 mod text;
@@ -13,6 +14,7 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+pub(crate) use listener::LocalListener;
 pub(crate) use mdns::MdnsDiscoveryService;
 pub(crate) use store::{Candidate, CandidateStore};
 
@@ -32,7 +34,7 @@ pub(crate) fn event_channel() -> (DiscoverySender, DiscoveryReceiver) {
 }
 
 pub(crate) trait DiscoveryService {
-    fn start(&mut self, events: DiscoverySender) -> anyhow::Result<()>;
+    fn start(&mut self, events: DiscoverySender, listener_port: u16) -> anyhow::Result<()>;
 
     async fn stop(&mut self) -> anyhow::Result<()>;
 }
@@ -162,8 +164,9 @@ mod tests {
     }
 
     impl DiscoveryService for FakeDiscoveryService {
-        fn start(&mut self, events: DiscoverySender) -> anyhow::Result<()> {
+        fn start(&mut self, events: DiscoverySender, listener_port: u16) -> anyhow::Result<()> {
             self.started = true;
+            assert_ne!(listener_port, 0);
             events
                 .try_send(DiscoveryEvent::Resolved(DiscoveredService::for_test(
                     "fake",
@@ -186,7 +189,7 @@ mod tests {
             stopped: false,
         };
 
-        service.start(sender).unwrap();
+        service.start(sender, 4242).unwrap();
         assert!(matches!(
             receiver.recv().await,
             Some(DiscoveryEvent::Resolved(_))

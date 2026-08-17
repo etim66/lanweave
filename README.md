@@ -5,7 +5,7 @@
 
 Lanweave is a terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
-Lanweave is currently a work in progress. The basic TUI shell is available, while discovery, networking, security, and file transfer are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
+Lanweave is currently a work in progress. The basic TUI shell, live discovery, and temporary advertised TCP listener are available, while connection handling, security, and file transfer are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
 
 ## How It Works
 
