@@ -5,6 +5,7 @@ use crate::app::model::{AppModel, AppState, Screen};
 
 use super::theme::{ACCENT, ERROR, WARNING};
 
+/// Returns the short status label shown for an application state.
 pub(super) fn status_text(state: AppState) -> &'static str {
     match state {
         AppState::Starting => "Starting",
@@ -24,6 +25,7 @@ pub(super) fn status_text(state: AppState) -> &'static str {
     }
 }
 
+/// Returns the title, message, and accent color for the current screen.
 pub(super) fn screen_content(model: &AppModel) -> (&'static str, &'static str, Color) {
     match model.screen() {
         Screen::Starting => ("Starting Lanweave", "Preparing the terminal...", WARNING),
@@ -56,6 +58,7 @@ pub(super) fn screen_content(model: &AppModel) -> (&'static str, &'static str, C
     }
 }
 
+/// Returns the user-facing message for an error state.
 fn failure_message(state: AppState) -> &'static str {
     match state {
         AppState::Error(FailureKind::Startup) => "Lanweave could not start.",

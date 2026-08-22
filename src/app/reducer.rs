@@ -34,6 +34,10 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     }
 }
 
+/// Applies a user action that is valid for the current state.
+///
+/// Returns the effect that must run for the action, or nothing when the action
+/// is not valid here. Quit always starts shutdown.
 fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
     if action == UserAction::Quit {
         return begin_shutdown(model);
@@ -83,6 +87,10 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
     effect.into_iter().collect()
 }
 
+/// Applies a service event that is valid for the current state.
+///
+/// Returns the effect that must run for the event, or nothing when the event
+/// is stale for this state. Events that do not match any state are ignored.
 fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     let effect = match (model.state(), event) {
         (AppState::Starting, AppEvent::StartupCompleted) => {
@@ -145,6 +153,9 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     effect.into_iter().collect()
 }
 
+/// Moves the model into the shutting-down state and requests the shutdown effect.
+///
+/// A second shutdown request is ignored, so no effect is ever emitted twice.
 fn begin_shutdown(model: &mut AppModel) -> Vec<Effect> {
     if model.state() == AppState::ShuttingDown {
         return Vec::new();

@@ -13,6 +13,9 @@ use super::presenter::status_text;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, HIGHLIGHT, MUTED, SURFACE, TEXT};
 
+/// Renders the command palette card with filtered rows, query, and hints.
+///
+/// Falls back to the raw query line on very small terminals.
 pub(super) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -72,6 +75,7 @@ pub(super) fn render(
     }
 }
 
+/// Renders the command rows, scrolled around the selected command.
 fn render_rows(
     frame: &mut Frame<'_>,
     card: Rect,
@@ -138,6 +142,7 @@ fn render_rows(
     }
 }
 
+/// Renders the query line and status row at the bottom of the palette.
 fn render_query(frame: &mut Frame<'_>, area: Rect, model: &AppModel, palette: &CommandPalette) {
     if area.height == 0 {
         return;

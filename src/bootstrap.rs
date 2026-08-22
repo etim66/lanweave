@@ -8,34 +8,60 @@ use crate::discovery::{
     event_channel as discovery_channel,
 };
 
+/// Runs Lanweave until shutdown completes.
+///
+/// Owns every long-lived resource: the terminal session, the TCP listener, the
+/// mDNS advertiser, the channels, and the background tasks. On return, all
+/// resources are stopped and the terminal is restored.
 pub(crate) async fn run() -> anyhow::Result<()> {
+    // --- Setup ---------------------------------------------------------------
+    // Terminal, channels, and network services must be in place before any
+    // task starts, so no task can race against an uninitialized resource.
     let mut terminal = crate::tui::TerminalSession::start()?;
     let (event_sender, event_receiver) = event_channel();
     let (effect_sender, effect_receiver) = effect_channel();
     let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
     let (discovery_sender, discovery_receiver) = discovery_channel();
+
     let mut listener = LocalListener::bind()
         .map_err(|error| anyhow::anyhow!("failed to bind the local TCP listener: {error}"))?;
     listener.start(event_sender.clone())?;
+
     let mut discovery = MdnsDiscoveryService::new();
     if let Err(error) = discovery.start(discovery_sender, listener.port()) {
         let _ = listener.stop().await;
         return Err(error);
     }
 
+    // --- Startup signal -----------------------------------------------------
+    // Announce that bootstrap is complete, then split the sender among the
+    // input and discovery tasks. Dropping the original sender guarantees the
+    // event loop ends once every producer task has finished.
     event_sender.send(AppEvent::StartupCompleted).await?;
     let input_sender = event_sender.clone();
     let discovery_event_sender = event_sender.clone();
     drop(event_sender);
 
+    // --- Background tasks ---------------------------------------------------
+    // Each task owns one side of the runtime:
+    // - the TUI input loop, which stops on the shutdown signal;
+    // - the discovery relay, which forwards mDNS events into the app;
+    // - the effect dispatcher, which drives the network services.
     let input = tokio::spawn(crate::tui::run_events(input_sender, stop_receiver));
     let discovery_events =
         tokio::spawn(relay_discovery(discovery_receiver, discovery_event_sender));
     let effects = tokio::spawn(dispatch_effects(effect_receiver, discovery, listener));
 
+    // --- Event loop ---------------------------------------------------------
+    // The runtime is the main process: it consumes events, reduces the model,
+    // and redraws the terminal. Everything else works around it.
     let runtime_result = AppRuntime::new(event_receiver, effect_sender)
         .run_with_observer(|model, ui| terminal.draw(model, ui))
         .await;
+
+    // --- Shutdown -----------------------------------------------------------
+    // Stop the input loop first, then join every task so resources are
+    // released in order before the terminal is restored.
     let _ = stop_sender.send(true);
 
     let input_result = input.await;
@@ -56,6 +82,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Relays discovery events from the mDNS service into the application event loop.
+///
+/// Stops when the discovery channel closes or the application no longer
+/// accepts events, which only happens once the runtime has shut down.
 async fn relay_discovery(
     mut discovery: DiscoveryReceiver,
     events: EventSender,
@@ -68,6 +98,11 @@ async fn relay_discovery(
     Ok(())
 }
 
+/// Executes the side effects requested by the application reducer.
+///
+/// A shutdown effect stops the network services and reports that shutdown was
+/// handled. If the channel closes first, the services are stopped anyway and
+/// `Ok(false)` is returned. All other effects are currently no-ops.
 async fn dispatch_effects(
     mut effects: EffectReceiver,
     mut discovery: MdnsDiscoveryService,
@@ -93,6 +128,7 @@ async fn dispatch_effects(
     Ok(false)
 }
 
+/// Stops advertising and listening so peers can no longer reach this device.
 async fn stop_network_services(
     discovery: &mut MdnsDiscoveryService,
     listener: &mut LocalListener,

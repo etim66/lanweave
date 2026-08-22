@@ -1,5 +1,9 @@
+/// Maximum length of an escaped display string in bytes.
 const MAX_DISPLAY_BYTES: usize = 128;
 
+/// Escapes controls and bidi characters for safe display, bounded by bytes.
+///
+/// Long output is cut with a trailing ellipsis at a UTF-8 boundary.
 pub(super) fn escape_display(input: &str) -> String {
     let mut output = String::new();
 
@@ -22,6 +26,7 @@ pub(super) fn escape_display(input: &str) -> String {
     output
 }
 
+/// Truncates `input` to at most `max_bytes` without splitting a character.
 pub(super) fn truncate_utf8(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_owned();
@@ -34,6 +39,7 @@ pub(super) fn truncate_utf8(input: &str, max_bytes: usize) -> String {
     input[..end].to_owned()
 }
 
+/// Returns whether `character` is a Unicode bidirectional control.
 fn is_bidi_control(character: char) -> bool {
     matches!(
         character,

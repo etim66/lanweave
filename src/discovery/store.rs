@@ -3,6 +3,7 @@ use tokio::time::Instant;
 use super::{DiscoveredService, DiscoveryEvent, MAX_CANDIDATES, ScopedAddress};
 use crate::app::action::DeviceId;
 
+/// A discovered device with a stable id assigned by the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Candidate {
     id: DeviceId,
@@ -15,37 +16,44 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
+    /// Returns the stable device id.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn id(&self) -> DeviceId {
         self.id
     }
 
+    /// Returns the display name shown to the user.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn display_name(&self) -> &str {
         &self.display_name
     }
 
+    /// Returns the advertised host name.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn host(&self) -> &str {
         &self.host
     }
 
+    /// Returns the reachable scoped addresses.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn addresses(&self) -> &[ScopedAddress] {
         &self.addresses
     }
 
+    /// Returns the advertised listener port.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn port(&self) -> u16 {
         self.port
     }
 
+    /// Returns when the candidate was last seen or updated.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn last_update(&self) -> Instant {
         self.last_update
     }
 }
 
+/// Bounded store of discovered candidates with stable ids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CandidateStore {
     candidates: Vec<Candidate>,
@@ -53,6 +61,7 @@ pub(crate) struct CandidateStore {
 }
 
 impl CandidateStore {
+    /// Creates an empty store.
     pub(crate) const fn new() -> Self {
         Self {
             candidates: Vec::new(),
@@ -60,16 +69,19 @@ impl CandidateStore {
         }
     }
 
+    /// Returns every candidate in discovery order.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }
 
+    /// Returns the candidate with the given id, if present.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn candidate(&self, id: DeviceId) -> Option<&Candidate> {
         self.candidates.iter().find(|candidate| candidate.id == id)
     }
 
+    /// Applies one discovery event to the store.
     pub(crate) fn apply(&mut self, event: DiscoveryEvent) {
         match event {
             DiscoveryEvent::Resolved(service) => self.upsert(service),
@@ -83,6 +95,7 @@ impl CandidateStore {
         }
     }
 
+    /// Inserts or refreshes a candidate, evicting the oldest when full.
     fn upsert(&mut self, service: DiscoveredService) {
         if let Some(candidate) = self.candidates.iter_mut().find(|candidate| {
             candidate
@@ -133,6 +146,7 @@ impl CandidateStore {
 }
 
 impl Default for CandidateStore {
+    /// Creates an empty store.
     fn default() -> Self {
         Self::new()
     }

@@ -1,5 +1,6 @@
 //! User intent and terminal-independent interaction inputs.
 
+/// Maximum length of a host portion in a [`DirectEndpoint`].
 pub(crate) const MAX_DIRECT_HOST_BYTES: usize = 255;
 
 /// Identifies a discovery candidate without exposing adapter-specific data.
@@ -8,6 +9,7 @@ pub(crate) struct DeviceId(u64);
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl DeviceId {
+    /// Wraps an adapter-provided identifier.
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -15,8 +17,8 @@ impl DeviceId {
 
 /// A user-supplied route used when multicast discovery is unavailable.
 ///
-/// Full syntax and platform validation belongs to the device-selection flow in
-/// PR 7. This type establishes the shared connection entry point now.
+/// Full syntax and platform validation belongs to the device-selection flow.
+/// This type establishes the shared connection entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DirectEndpoint {
     host: String,
@@ -24,6 +26,7 @@ pub(crate) struct DirectEndpoint {
 }
 
 impl DirectEndpoint {
+    /// Builds an endpoint, rejecting empty or oversized hosts and port zero.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(host: String, port: u16) -> Option<Self> {
         if host.is_empty() || host.len() > MAX_DIRECT_HOST_BYTES || port == 0 {
@@ -32,11 +35,13 @@ impl DirectEndpoint {
         Some(Self { host, port })
     }
 
+    /// Returns the host portion of the endpoint.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn host(&self) -> &str {
         &self.host
     }
 
+    /// Returns the port of the endpoint.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn port(&self) -> u16 {
         self.port

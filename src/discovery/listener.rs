@@ -9,6 +9,7 @@ use crate::app::event::AppEvent;
 use crate::app::failure::FailureKind;
 use crate::app::runtime::EventSender;
 
+/// Time allowed for the listener task to stop before shutdown is reported.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Owns the TCP listener advertised through mDNS.
@@ -23,9 +24,10 @@ pub(crate) struct LocalListener {
 }
 
 impl LocalListener {
+    /// Binds a wildcard IPv4 listener on an ephemeral port.
     pub(crate) fn bind() -> anyhow::Result<Self> {
         // An IPv4 wildcard is portable across all target platforms and covers
-        // every active IPv4 interface. Scoped IPv6 binding remains a PR 7
+        // every active IPv4 interface. Scoped IPv6 binding is a future
         // endpoint-policy decision rather than relying on OS dual-stack defaults.
         let listener = bind_ipv4()?;
         let address = listener
@@ -40,10 +42,14 @@ impl LocalListener {
         })
     }
 
+    /// Returns the bound port advertised through discovery.
     pub(crate) const fn port(&self) -> u16 {
         self.address.port()
     }
 
+    /// Starts accepting connections, reporting failures through `events`.
+    ///
+    /// Fails when the listener is already running or its socket is gone.
     pub(crate) fn start(&mut self, events: EventSender) -> anyhow::Result<()> {
         if self.task.is_some() {
             anyhow::bail!("local listener is already running");
@@ -77,6 +83,9 @@ impl LocalListener {
         Ok(())
     }
 
+    /// Stops accepting connections and joins the accept task.
+    ///
+    /// Idempotent: stopping twice succeeds and the socket is released.
     pub(crate) async fn stop(&mut self) -> anyhow::Result<()> {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(true);
@@ -91,6 +100,7 @@ impl LocalListener {
         Ok(())
     }
 
+    /// Returns the loopback address of the bound port, for tests.
     #[cfg(test)]
     fn loopback_address(&self) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), self.address.port())
@@ -98,6 +108,7 @@ impl LocalListener {
 }
 
 impl Drop for LocalListener {
+    /// Best-effort cleanup when the listener is dropped without being stopped.
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(true);
@@ -108,6 +119,7 @@ impl Drop for LocalListener {
     }
 }
 
+/// Binds a wildcard IPv4 TCP socket on an ephemeral port.
 fn bind_ipv4() -> anyhow::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
     socket.bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))?;

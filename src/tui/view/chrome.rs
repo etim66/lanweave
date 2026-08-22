@@ -8,6 +8,9 @@ use crate::app::model::AppModel;
 use super::presenter::status_text;
 use super::theme::MUTED;
 
+/// Renders the footer with the status label and version on the right.
+///
+/// The version is dropped when the terminal is too narrow.
 pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let horizontal_padding = u16::from(area.width >= 8) * 2;
     let inner = Rect::new(

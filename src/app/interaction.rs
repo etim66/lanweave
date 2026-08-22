@@ -6,33 +6,43 @@ use super::command_palette::{
 };
 use super::model::AppModel;
 
+/// Live query and selection for the open command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandPalette {
     pub(crate) query: String,
     pub(crate) selected: Option<CommandId>,
 }
 
+/// A full-screen UI surface drawn above the current screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
     CommandPalette(CommandPalette),
     Help,
 }
 
+/// Terminal-independent UI state that the view renders.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UiState {
     overlay: Option<Overlay>,
 }
 
 impl UiState {
+    /// Returns the active overlay, if any.
     pub(crate) const fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
     }
 
+    /// Closes any open overlay.
     pub(super) fn clear(&mut self) {
         self.overlay = None;
     }
 }
 
+/// Interprets one key against the current UI state.
+///
+/// Returns a user action when the key completes one, and otherwise updates
+/// `ui` in place. Typing in the palette is capped at
+/// [`MAX_COMMAND_QUERY_CHARS`].
 pub(crate) fn apply_key_input(
     model: &AppModel,
     ui: &mut UiState,
@@ -106,6 +116,10 @@ pub(crate) fn apply_key_input(
     }
 }
 
+/// Applies an already resolved action to the UI state.
+///
+/// Returns `true` when the action changed the UI and `false` when it must be
+/// forwarded to the application model instead.
 pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
     match action {
         UserAction::ShowHelp => {
@@ -120,6 +134,7 @@ pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
     }
 }
 
+/// Re-validates the palette selection after the application state changed.
 pub(super) fn reconcile(model: &AppModel, ui: &mut UiState) {
     let Some(Overlay::CommandPalette(palette)) = ui.overlay.as_mut() else {
         return;
@@ -127,6 +142,7 @@ pub(super) fn reconcile(model: &AppModel, ui: &mut UiState) {
     palette.selected = reconcile_selection(model.capabilities(), &palette.query, palette.selected);
 }
 
+/// Opens the command palette with an empty query and the first command selected.
 fn open_palette(model: &AppModel, ui: &mut UiState) {
     let query = String::new();
     let selected = first_visible(model.capabilities(), &query);

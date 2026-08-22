@@ -8,7 +8,9 @@ use super::interaction::{self, UiState};
 use super::model::{AppModel, AppState};
 use super::reducer::{MAX_EFFECTS_PER_EVENT, update};
 
+/// Capacity of the application event channel.
 pub const APP_EVENT_CHANNEL_CAPACITY: usize = 32;
+/// Capacity of the application effect channel.
 pub const APP_EFFECT_CHANNEL_CAPACITY: usize = 16;
 
 pub type EventSender = mpsc::Sender<AppEvent>;
@@ -16,10 +18,12 @@ pub type EventReceiver = mpsc::Receiver<AppEvent>;
 pub type EffectSender = mpsc::Sender<Effect>;
 pub type EffectReceiver = mpsc::Receiver<Effect>;
 
+/// Creates the bounded event channel.
 pub fn event_channel() -> (EventSender, EventReceiver) {
     mpsc::channel(APP_EVENT_CHANNEL_CAPACITY)
 }
 
+/// Creates the bounded effect channel.
 pub fn effect_channel() -> (EffectSender, EffectReceiver) {
     mpsc::channel(APP_EFFECT_CHANNEL_CAPACITY)
 }
@@ -34,6 +38,7 @@ pub struct AppRuntime {
 }
 
 impl AppRuntime {
+    /// Creates a runtime with a fresh model and empty UI state.
     pub fn new(events: EventReceiver, effects: EffectSender) -> Self {
         Self {
             model: AppModel::new(),
@@ -92,6 +97,10 @@ impl AppRuntime {
         Ok(self.model)
     }
 
+    /// Reduces one event against the model and reconciles the UI state.
+    ///
+    /// The UI overlay is cleared once shutdown starts so no stale screen
+    /// survives into the shutdown view.
     fn reduce(&mut self, event: AppEvent) -> Vec<Effect> {
         let effects = match event {
             AppEvent::KeyInput(input) => {
@@ -113,6 +122,8 @@ impl AppRuntime {
         effects
     }
 
+    /// Applies an action to the UI first, forwarding it to the model when the
+    /// UI does not consume it.
     fn apply_user_action(&mut self, action: super::action::UserAction) -> Vec<Effect> {
         if interaction::apply_user_action(&mut self.ui, action.clone()) {
             Vec::new()
@@ -121,6 +132,7 @@ impl AppRuntime {
         }
     }
 
+    /// Sends every effect to the handler, failing if the handler is gone.
     async fn send_effects(&self, effects: Vec<Effect>) -> AppResult<()> {
         for effect in effects {
             self.effects
@@ -132,6 +144,7 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// Starts shutdown after a rendering failure so the app still stops cleanly.
     async fn shutdown_after_observer_error(&mut self) {
         let effects = self.reduce(AppEvent::ShutdownRequested);
         let _ = self.send_effects(effects).await;

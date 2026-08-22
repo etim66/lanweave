@@ -15,9 +15,15 @@ use super::{
     SERVICE_TYPE, ScopedAddress,
 };
 
+/// Time allowed for daemon shutdown steps before they are reported as failures.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum number of own service names tracked as conflict aliases.
 const MAX_OWN_SERVICE_NAMES: usize = 32;
 
+/// mDNS/DNS-SD adapter backed by the `mdns-sd` daemon.
+///
+/// Advertises the local listener, browses for peers, and relays peer events
+/// onto the discovery channel while filtering out own advertisements.
 pub(crate) struct MdnsDiscoveryService {
     daemon: Option<ServiceDaemon>,
     registered_fullname: Option<String>,
@@ -26,6 +32,7 @@ pub(crate) struct MdnsDiscoveryService {
 }
 
 impl MdnsDiscoveryService {
+    /// Creates a stopped service with no daemon yet.
     pub(crate) const fn new() -> Self {
         Self {
             daemon: None,
@@ -37,6 +44,10 @@ impl MdnsDiscoveryService {
 }
 
 impl super::DiscoveryService for MdnsDiscoveryService {
+    /// Starts the daemon, registers the local advertisement, and begins browsing.
+    ///
+    /// Fails without side effects when the daemon cannot initialize, browse,
+    /// or register. IPv6 discovery is disabled so only IPv4 peers appear.
     fn start(&mut self, events: DiscoverySender, listener_port: u16) -> anyhow::Result<()> {
         if self.daemon.is_some() {
             anyhow::bail!("discovery service is already running");
@@ -142,6 +153,10 @@ impl super::DiscoveryService for MdnsDiscoveryService {
         Ok(())
     }
 
+    /// Stops the daemon, unregistering the advertisement and confirming shutdown.
+    ///
+    /// Every step is attempted even when an earlier one fails; the first
+    /// error is reported.
     async fn stop(&mut self) -> anyhow::Result<()> {
         let Some(daemon) = self.daemon.take() else {
             return Ok(());
@@ -208,6 +223,7 @@ impl super::DiscoveryService for MdnsDiscoveryService {
 }
 
 impl Drop for MdnsDiscoveryService {
+    /// Best-effort cleanup when the service is dropped without being stopped.
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(true);
@@ -225,11 +241,13 @@ impl Drop for MdnsDiscoveryService {
     }
 }
 
+/// Builds the local advertisement for the given listener port.
 fn local_service(port: u16) -> anyhow::Result<ServiceInfo> {
     let label = local_dns_label();
     service_info(&label, &format!("{label}.local."), port)
 }
 
+/// Builds a version-one advertisement with the given instance and hostname.
 fn service_info(instance: &str, hostname: &str, port: u16) -> anyhow::Result<ServiceInfo> {
     ServiceInfo::new(
         SERVICE_TYPE,
@@ -243,6 +261,7 @@ fn service_info(instance: &str, hostname: &str, port: u16) -> anyhow::Result<Ser
     .map_err(|error| anyhow::anyhow!("failed to build local advertisement: {error}"))
 }
 
+/// Derives a run-specific DNS label from the host name.
 fn local_dns_label() -> String {
     let host = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -250,6 +269,7 @@ fn local_dns_label() -> String {
     dns_label(&host, fastrand::u64(..))
 }
 
+/// Sanitizes `host` into a DNS label and appends `nonce` for uniqueness.
 fn dns_label(host: &str, nonce: u64) -> String {
     let mut label = String::with_capacity(48);
     let mut previous_was_dash = false;
@@ -278,6 +298,7 @@ fn dns_label(host: &str, nonce: u64) -> String {
     format!("{label}-{nonce:016x}")
 }
 
+/// Returns the fullname an event refers to, when it names a service.
 fn event_fullname(event: &ServiceEvent) -> Option<&str> {
     match event {
         ServiceEvent::ServiceResolved(service) => Some(&service.fullname),
@@ -286,6 +307,10 @@ fn event_fullname(event: &ServiceEvent) -> Option<&str> {
     }
 }
 
+/// Records a daemon name-conflict alias of our own advertisement.
+///
+/// Only changes that rename the registered service are tracked, and the
+/// alias list never exceeds [`MAX_OWN_SERVICE_NAMES`] entries.
 fn record_own_name_change(
     own_fullnames: &mut VecDeque<String>,
     registered_fullname: &str,
@@ -307,12 +332,14 @@ fn record_own_name_change(
     own_fullnames.push_back(change.new_name.clone());
 }
 
+/// Returns whether `fullname` is one of our own advertised names.
 fn is_own_fullname(own_fullnames: &VecDeque<String>, fullname: &str) -> bool {
     own_fullnames
         .iter()
         .any(|own| own.eq_ignore_ascii_case(fullname))
 }
 
+/// Keeps the first error while later cleanup steps still run.
 fn remember_first_error(first: &mut Option<anyhow::Error>, result: anyhow::Result<()>) {
     if first.is_none()
         && let Err(error) = result
@@ -321,6 +348,10 @@ fn remember_first_error(first: &mut Option<anyhow::Error>, result: anyhow::Resul
     }
 }
 
+/// Converts a daemon browse event into a discovery event.
+///
+/// Resolved services are validated and normalized; removals are forwarded
+/// only when they match the Lanweave service type and a sane instance name.
 fn convert_event(event: ServiceEvent, observed_at: Instant) -> Option<DiscoveryEvent> {
     match event {
         ServiceEvent::ServiceResolved(service) => {
@@ -337,6 +368,10 @@ fn convert_event(event: ServiceEvent, observed_at: Instant) -> Option<DiscoveryE
     }
 }
 
+/// Validates a resolved service and maps its scoped addresses.
+///
+/// Returns `None` when the service is invalid, is not the Lanweave service
+/// type, or does not advertise a supported protocol version.
 fn normalize_service(service: &ResolvedService, observed_at: Instant) -> Option<DiscoveredService> {
     if !service.is_valid()
         || !service.ty_domain.eq_ignore_ascii_case(SERVICE_TYPE)
@@ -386,10 +421,12 @@ fn normalize_service(service: &ResolvedService, observed_at: Instant) -> Option<
     )
 }
 
+/// Returns whether the advertised protocol version is supported.
 fn supports_version(value: Option<Option<&[u8]>>) -> bool {
     value == Some(Some(b"1"))
 }
 
+/// Extracts the instance name from a fullname, without the service suffix.
 fn service_display_name(fullname: &str) -> Option<&str> {
     if fullname.len() <= SERVICE_TYPE.len() {
         return None;

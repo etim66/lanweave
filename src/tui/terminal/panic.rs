@@ -9,6 +9,7 @@ use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 
 use super::TERMINAL_ACTIVE;
 
+/// Guards against installing the panic hook more than once.
 static INSTALL_PANIC_HOOK: Once = Once::new();
 
 /// Installs process-wide best-effort terminal restoration before panic output.
@@ -22,6 +23,7 @@ pub(crate) fn install_panic_hook() {
     });
 }
 
+/// Restores the terminal after a panic, if the session was still active.
 fn restore_after_panic() {
     if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
         return;

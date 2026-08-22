@@ -9,6 +9,7 @@ use crossterm::terminal::{
 
 use super::TERMINAL_ACTIVE;
 
+/// Terminal operations the guard must reverse on restore.
 pub(super) trait TerminalControl {
     fn enable_raw(&mut self) -> io::Result<()>;
     fn enter_alternate_screen(&mut self) -> io::Result<()>;
@@ -18,6 +19,7 @@ pub(super) trait TerminalControl {
     fn disable_raw(&mut self) -> io::Result<()>;
 }
 
+/// Real crossterm-backed terminal control.
 pub(super) struct CrosstermControl;
 
 impl TerminalControl for CrosstermControl {
@@ -46,6 +48,11 @@ impl TerminalControl for CrosstermControl {
     }
 }
 
+/// RAII guard that tracks and reverses terminal state changes.
+///
+/// Restore is idempotent and only reverses the steps that actually ran. When
+/// `marks_process_active` is set, the shared process-wide flag follows the
+/// guard so the panic hook and draw calls agree on liveness.
 pub(super) struct TerminalGuard<C: TerminalControl> {
     control: C,
     raw: bool,
@@ -55,6 +62,10 @@ pub(super) struct TerminalGuard<C: TerminalControl> {
 }
 
 impl<C: TerminalControl> TerminalGuard<C> {
+    /// Enables raw mode, enters the alternate screen, and hides the cursor.
+    ///
+    /// On any failure, the steps that already ran are rolled back before the
+    /// error is returned.
     pub(super) fn start(control: C, marks_process_active: bool) -> io::Result<Self> {
         let mut guard = Self {
             control,
@@ -77,6 +88,10 @@ impl<C: TerminalControl> TerminalGuard<C> {
         Ok(guard)
     }
 
+    /// Reverses every applied change, continuing past individual failures.
+    ///
+    /// Idempotent: a second call has nothing left to undo. The process-wide
+    /// flag stays set only while any change is still applied.
     pub(super) fn restore(&mut self) -> io::Result<()> {
         let mut first_error = None;
         if self.cursor_hidden {
@@ -108,11 +123,13 @@ impl<C: TerminalControl> TerminalGuard<C> {
 }
 
 impl<C: TerminalControl> Drop for TerminalGuard<C> {
+    /// Restores the terminal when the guard is dropped.
     fn drop(&mut self) {
         let _ = self.restore();
     }
 }
 
+/// Keeps the first cleanup error while later steps still run.
 fn remember_first_error(first_error: &mut Option<io::Error>, error: io::Error) {
     if first_error.is_none() {
         *first_error = Some(error);

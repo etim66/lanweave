@@ -10,8 +10,14 @@ use crate::app::event::AppEvent;
 use crate::app::failure::FailureKind;
 use crate::app::runtime::EventSender;
 
+/// How often a redraw tick is emitted when the terminal is idle.
 const TICK_RATE: Duration = Duration::from_millis(250);
 
+/// Captures terminal events and forwards them to the application event loop.
+///
+/// Runs until the stop signal fires, the terminal stream closes, or Ctrl+C is
+/// pressed. A failed terminal stream reports a failure event before shutting
+/// down, and every shutdown path goes through [`send_shutdown`].
 pub(crate) async fn run_events(
     events: EventSender,
     mut stop: watch::Receiver<bool>,
@@ -56,6 +62,7 @@ pub(crate) async fn run_events(
     }
 }
 
+/// Sends a redraw tick when the event queue is completely drained.
 fn send_tick(events: &EventSender) {
     // Other events also redraw the view, so retain at most one standalone tick.
     if events.capacity() == events.max_capacity() {
@@ -63,6 +70,7 @@ fn send_tick(events: &EventSender) {
     }
 }
 
+/// Converts and forwards one terminal event, awaiting only for interactive keys.
 async fn dispatch_terminal_event(events: &EventSender, event: Event) {
     let app_event = map_terminal_event(event);
 
@@ -75,6 +83,7 @@ async fn dispatch_terminal_event(events: &EventSender, event: Event) {
     }
 }
 
+/// Maps a raw terminal event to an application event.
 fn map_terminal_event(event: Event) -> Option<AppEvent> {
     match event {
         Event::Key(key) => map_key(key),
@@ -83,6 +92,7 @@ fn map_terminal_event(event: Event) -> Option<AppEvent> {
     }
 }
 
+/// Maps a key press to an application event, ignoring repeats and releases.
 fn map_key(key: KeyEvent) -> Option<AppEvent> {
     if key.kind != KeyEventKind::Press {
         return None;
@@ -121,10 +131,12 @@ fn map_key(key: KeyEvent) -> Option<AppEvent> {
     }
 }
 
+/// Returns whether the key is free of command-modifying modifiers.
 fn has_no_command_modifier(modifiers: KeyModifiers) -> bool {
     !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+/// Requests shutdown through the application event loop.
 async fn send_shutdown(events: &EventSender) {
     let _ = events.send(AppEvent::ShutdownRequested).await;
 }

@@ -3,8 +3,10 @@
 use super::action::UserAction;
 use super::model::AppCapabilities;
 
+/// Maximum number of characters a palette query may hold.
 pub(crate) const MAX_COMMAND_QUERY_CHARS: usize = 64;
 
+/// Identifies a slash command independently of its current availability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CommandId {
     Help,
@@ -14,6 +16,7 @@ pub(crate) enum CommandId {
     Quit,
 }
 
+/// Whether a command may run, and why not when it may not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandAvailability {
     Enabled,
@@ -21,6 +24,7 @@ pub(crate) enum CommandAvailability {
     Hidden,
 }
 
+/// Static description of one slash command.
 #[derive(Debug, Clone)]
 pub(crate) struct CommandSpec {
     pub(crate) id: CommandId,
@@ -30,6 +34,7 @@ pub(crate) struct CommandSpec {
     pub(crate) action: UserAction,
 }
 
+/// The complete slash command table, in display order.
 const COMMANDS: [CommandSpec; 5] = [
     CommandSpec {
         id: CommandId::Help,
@@ -68,10 +73,15 @@ const COMMANDS: [CommandSpec; 5] = [
     },
 ];
 
+/// Returns the full slash command table.
 pub(crate) fn registry() -> &'static [CommandSpec] {
     &COMMANDS
 }
 
+/// Returns the commands visible for `capabilities`, filtered by `query`.
+///
+/// A leading `/` in the query is ignored, and matching is case-insensitive
+/// against both the command name and its description.
 pub(crate) fn visible_commands(
     capabilities: AppCapabilities,
     query: &str,
@@ -89,12 +99,14 @@ pub(crate) fn visible_commands(
         .collect()
 }
 
+/// Returns the first visible command for `query`, if any.
 pub(crate) fn first_visible(capabilities: AppCapabilities, query: &str) -> Option<CommandId> {
     visible_commands(capabilities, query)
         .first()
         .map(|command| command.id)
 }
 
+/// Moves the palette selection by one command, wrapping at the ends.
 pub(crate) fn move_selection(
     capabilities: AppCapabilities,
     query: &str,
@@ -116,6 +128,7 @@ pub(crate) fn move_selection(
     Some(commands[next].id)
 }
 
+/// Keeps `selected` valid for the current query, falling back to the first command.
 pub(crate) fn reconcile_selection(
     capabilities: AppCapabilities,
     query: &str,
@@ -127,6 +140,7 @@ pub(crate) fn reconcile_selection(
         .or_else(|| commands.first().map(|command| command.id))
 }
 
+/// Resolves the selected command to its action, if it is currently enabled.
 pub(crate) fn resolve(
     capabilities: AppCapabilities,
     query: &str,
@@ -140,6 +154,7 @@ pub(crate) fn resolve(
         .map(|command| command.action.clone())
 }
 
+/// Availability for commands that run whenever the app accepts commands.
 fn always_available(capabilities: AppCapabilities) -> CommandAvailability {
     if capabilities.accepts_commands {
         CommandAvailability::Enabled
@@ -148,6 +163,7 @@ fn always_available(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
+/// Availability for the devices command, which needs the browsing screen.
 fn devices_availability(capabilities: AppCapabilities) -> CommandAvailability {
     if capabilities.can_show_devices {
         CommandAvailability::Enabled
@@ -156,6 +172,7 @@ fn devices_availability(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
+/// Availability for the send command, which needs an idle session.
 fn send_availability(capabilities: AppCapabilities) -> CommandAvailability {
     if capabilities.can_start_transfer {
         CommandAvailability::Enabled
@@ -168,6 +185,7 @@ fn send_availability(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
+/// Availability for the disconnect command, which needs an active connection.
 fn disconnect_availability(capabilities: AppCapabilities) -> CommandAvailability {
     if capabilities.can_disconnect {
         CommandAvailability::Enabled

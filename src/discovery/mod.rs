@@ -18,27 +18,39 @@ pub(crate) use listener::LocalListener;
 pub(crate) use mdns::MdnsDiscoveryService;
 pub(crate) use store::{Candidate, CandidateStore};
 
+/// mDNS service type advertised and browsed by Lanweave.
 pub(crate) const SERVICE_TYPE: &str = "_lanweave._tcp.local.";
+/// Capacity of the discovery event channel.
 pub(crate) const DISCOVERY_EVENT_CHANNEL_CAPACITY: usize = 32;
+/// Maximum number of candidates kept in the store.
 pub(crate) const MAX_CANDIDATES: usize = 64;
+/// Maximum number of endpoints retained per candidate.
 pub(crate) const MAX_ENDPOINTS_PER_CANDIDATE: usize = 16;
+/// Maximum length of a service instance name in bytes.
 pub(crate) const MAX_SERVICE_INSTANCE_BYTES: usize = 255;
+/// Maximum length of a host name in bytes.
 pub(crate) const MAX_HOST_BYTES: usize = 255;
+/// Maximum length of an interface name in bytes.
 pub(crate) const MAX_INTERFACE_NAME_BYTES: usize = 64;
 
 pub(crate) type DiscoverySender = mpsc::Sender<DiscoveryEvent>;
 pub(crate) type DiscoveryReceiver = mpsc::Receiver<DiscoveryEvent>;
 
+/// Creates the bounded discovery event channel.
 pub(crate) fn event_channel() -> (DiscoverySender, DiscoveryReceiver) {
     mpsc::channel(DISCOVERY_EVENT_CHANNEL_CAPACITY)
 }
 
+/// Adapter contract for discovering peers advertising the Lanweave service.
 pub(crate) trait DiscoveryService {
+    /// Starts discovery and advertising, forwarding events through `events`.
     fn start(&mut self, events: DiscoverySender, listener_port: u16) -> anyhow::Result<()>;
 
+    /// Stops advertising and discovery, releasing all resources.
     async fn stop(&mut self) -> anyhow::Result<()>;
 }
 
+/// A change observed on the LAN: a peer appeared or disappeared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DiscoveryEvent {
     Resolved(DiscoveredService),
@@ -48,6 +60,7 @@ pub(crate) enum DiscoveryEvent {
     },
 }
 
+/// A validated peer advertisement ready for the candidate store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscoveredService {
     service_instance: String,
@@ -59,6 +72,9 @@ pub(crate) struct DiscoveredService {
 }
 
 impl DiscoveredService {
+    /// Validates an advertisement, deduplicating and bounding its endpoints.
+    ///
+    /// Returns `None` when any field is empty, oversized, or unusable.
     fn new(
         service_instance: String,
         display_name: String,
@@ -92,6 +108,7 @@ impl DiscoveredService {
         })
     }
 
+    /// Builds a minimal valid service for tests.
     #[cfg(test)]
     pub(crate) fn for_test(name: &str, observed_at: Instant) -> Self {
         Self::new(
@@ -109,6 +126,7 @@ impl DiscoveredService {
     }
 }
 
+/// One reachable address of a discovered service, bound to a network interface.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ScopedAddress {
     address: IpAddr,
@@ -116,21 +134,25 @@ pub(crate) struct ScopedAddress {
 }
 
 impl ScopedAddress {
+    /// Creates an address bound to the given interface.
     fn new(address: IpAddr, interface: InterfaceScope) -> Self {
         Self { address, interface }
     }
 
+    /// Returns the IP address.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn address(&self) -> IpAddr {
         self.address
     }
 
+    /// Returns the index of the interface the address is bound to.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn interface_index(&self) -> u32 {
         self.interface.index
     }
 }
 
+/// Identifies the network interface an address is valid on.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct InterfaceScope {
     name: String,
@@ -138,6 +160,7 @@ pub(crate) struct InterfaceScope {
 }
 
 impl InterfaceScope {
+    /// Creates a scope, truncating and escaping the interface name.
     fn new(name: &str, index: u32) -> Self {
         Self {
             name: text::truncate_utf8(&text::escape_display(name), MAX_INTERFACE_NAME_BYTES),

@@ -11,6 +11,9 @@ use super::layout::{centered_rect, inset_surface, surface_width};
 use super::render_focus_rail;
 use super::theme::{ACCENT, MUTED, SURFACE, TEXT};
 
+/// Renders the help overlay with keyboard hints and command availability.
+///
+/// Falls back to a bare "Help" line on very small terminals.
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     if area.width < 8 || area.height < 3 {
         frame.render_widget(

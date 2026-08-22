@@ -17,6 +17,10 @@ use crate::app::model::AppModel;
 use self::chrome::render_footer;
 use self::theme::{ACCENT, BACKGROUND, TEXT};
 
+/// Renders the full screen: canvas, active overlay or home view, and footer.
+///
+/// The footer is only drawn when the terminal is tall enough; a zero-sized
+/// terminal renders nothing but the background.
 pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
     let area = frame.area();
     frame.render_widget(
@@ -53,6 +57,7 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
     }
 }
 
+/// Renders the accent-colored focus rail on the left edge of `area`.
 fn render_focus_rail(frame: &mut Frame<'_>, area: Rect) {
     if area.width > 0 && area.height > 0 {
         frame.render_widget(

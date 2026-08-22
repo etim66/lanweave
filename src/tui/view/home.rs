@@ -11,6 +11,9 @@ use super::presenter::screen_content;
 use super::render_focus_rail;
 use super::theme::{MUTED, SURFACE, TEXT, WARNING};
 
+/// Renders the home screen: brand, state surface, hints, and tip.
+///
+/// Falls back to a single centered line on very small terminals.
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     if area.width < 12 || area.height < 5 {
         frame.render_widget(
@@ -57,6 +60,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     }
 }
 
+/// Renders the two-tone "lanweave" brand line.
 fn render_brand(frame: &mut Frame<'_>, area: Rect) {
     let brand = Line::from(vec![
         Span::styled("lan", Style::new().fg(MUTED).add_modifier(Modifier::BOLD)),
@@ -65,6 +69,7 @@ fn render_brand(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(brand).alignment(Alignment::Center), area);
 }
 
+/// Renders the centered surface with the screen title, message, and focus rail.
 fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), area);
     render_focus_rail(frame, area);
@@ -88,6 +93,7 @@ fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 }
 
+/// Renders the one-line keyboard hints below the state surface.
 fn render_hints(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -103,6 +109,7 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// Renders the "Tip" line shown on roomy terminals.
 fn render_tip(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![

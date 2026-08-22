@@ -24,6 +24,7 @@ pub enum AppState {
 }
 
 impl AppState {
+    /// Every state, for exhaustive test coverage.
     #[cfg(test)]
     pub const ALL: [Self; 15] = [
         Self::Starting,
@@ -43,6 +44,7 @@ impl AppState {
         Self::ShuttingDown,
     ];
 
+    /// Returns whether the app is in a pairing state.
     pub const fn is_pairing(self) -> bool {
         matches!(
             self,
@@ -53,6 +55,7 @@ impl AppState {
         )
     }
 
+    /// Returns whether the app has an established session.
     pub const fn has_session(self) -> bool {
         matches!(
             self,
@@ -66,10 +69,12 @@ impl AppState {
         )
     }
 
+    /// Returns whether a transfer is actively running.
     pub const fn is_transfer_active(self) -> bool {
         matches!(self, Self::TransferringOutbound | Self::TransferringInbound)
     }
 
+    /// Returns whether the user may start a disconnect from this state.
     pub const fn can_disconnect(self) -> bool {
         (self.is_pairing() && !matches!(self, Self::ClosingPairing))
             || (self.has_session() && !matches!(self, Self::ClosingSession))
@@ -104,6 +109,7 @@ pub enum Screen {
 }
 
 impl From<AppState> for Screen {
+    /// Maps each application state to the screen that renders it.
     fn from(state: AppState) -> Self {
         match state {
             AppState::Starting => Self::Starting,
@@ -132,6 +138,7 @@ pub struct AppModel {
 }
 
 impl AppModel {
+    /// Creates a model in the starting state with an empty candidate store.
     pub const fn new() -> Self {
         Self {
             state: AppState::Starting,
@@ -139,19 +146,23 @@ impl AppModel {
         }
     }
 
+    /// Returns the current application state.
     pub const fn state(&self) -> AppState {
         self.state
     }
 
+    /// Returns the screen the current state should render.
     pub fn screen(&self) -> Screen {
         self.state.into()
     }
 
+    /// Returns the currently discovered candidates.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn candidates(&self) -> &[Candidate] {
         self.candidates.candidates()
     }
 
+    /// Returns the interaction capabilities of the current state.
     pub(crate) fn capabilities(&self) -> AppCapabilities {
         let state = self.state;
         AppCapabilities {
@@ -165,14 +176,17 @@ impl AppModel {
         }
     }
 
+    /// Moves the model into `state`, discarding the previous one.
     pub(super) fn transition_to(&mut self, state: AppState) {
         self.state = state;
     }
 
+    /// Applies one discovery event to the candidate store.
     pub(super) fn apply_discovery(&mut self, event: DiscoveryEvent) {
         self.candidates.apply(event);
     }
 
+    /// Builds a model in `state` for tests.
     #[cfg(test)]
     pub(crate) fn for_test(state: AppState) -> Self {
         Self {
@@ -183,6 +197,7 @@ impl AppModel {
 }
 
 impl Default for AppModel {
+    /// Creates a model in the starting state.
     fn default() -> Self {
         Self::new()
     }

@@ -1,8 +1,8 @@
 # cargo-deny configuration for Lanweave.
 #
-# Policy is strict from PR 01. No temporary exception blocks. If a transitive
-# dependency surfaces a copyleft license, the fix is to swap the offending
-# crate, not to relax this file. See docs/IMPLEMENTATION_ROADMAP.md.
+# Policy is strict from the first review. No temporary exception blocks. If a
+# transitive dependency surfaces a copyleft license, the fix is to swap the
+# offending crate, not to relax this file. See docs/IMPLEMENTATION_ROADMAP.md.
 
 [graph]
 all-features = false
