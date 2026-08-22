@@ -26,33 +26,51 @@ pub(super) fn status_text(state: AppState) -> &'static str {
 }
 
 /// Returns the title, message, and accent color for the current screen.
-pub(super) fn screen_content(model: &AppModel) -> (&'static str, &'static str, Color) {
+pub(super) fn screen_content(model: &AppModel) -> (String, String, Color) {
     match model.screen() {
-        Screen::Starting => ("Starting Lanweave", "Preparing the terminal...", WARNING),
-        Screen::Browsing => (
-            "No devices found",
-            "Searching the local network. Devices will appear automatically.",
-            ACCENT,
+        Screen::Starting => (
+            "Starting Lanweave".to_owned(),
+            "Preparing the terminal...".to_owned(),
+            WARNING,
         ),
+        Screen::Browsing => {
+            if model.sorted_candidates().is_empty() {
+                (
+                    "No devices found".to_owned(),
+                    "Searching the local network. Devices will appear automatically.".to_owned(),
+                    ACCENT,
+                )
+            } else {
+                (
+                    "Devices".to_owned(),
+                    "Use up/down to select a device and enter to connect.".to_owned(),
+                    ACCENT,
+                )
+            }
+        }
         Screen::Error => (
-            "Something went wrong",
-            failure_message(model.state()),
+            "Something went wrong".to_owned(),
+            failure_message(model.state()).to_owned(),
             ERROR,
         ),
-        Screen::Shutdown => ("Closing Lanweave", "Shutting down safely...", WARNING),
+        Screen::Shutdown => (
+            "Closing Lanweave".to_owned(),
+            "Shutting down safely...".to_owned(),
+            WARNING,
+        ),
         Screen::Pairing => (
-            "Pairing",
-            "Pairing controls are not available in this build.",
+            "Pairing".to_owned(),
+            "Pairing controls are not available in this build.".to_owned(),
             ACCENT,
         ),
         Screen::Session => (
-            "Session active",
-            "Session controls are not available in this build.",
+            "Session active".to_owned(),
+            "Session controls are not available in this build.".to_owned(),
             ACCENT,
         ),
         Screen::Transfer => (
-            "Transfer",
-            "Transfer controls are not available in this build.",
+            "Transfer".to_owned(),
+            "Transfer controls are not available in this build.".to_owned(),
             ACCENT,
         ),
     }

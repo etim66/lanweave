@@ -1,4 +1,5 @@
 mod chrome;
+mod direct_address;
 mod help;
 mod home;
 mod layout;
@@ -44,8 +45,11 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         Some(Overlay::CommandPalette(command_palette)) => {
             palette::render(frame, content, model, command_palette);
         }
+        Some(Overlay::DirectAddress(input)) => {
+            direct_address::render(frame, content, model, input);
+        }
         Some(Overlay::Help) => help::render(frame, content, model),
-        None => home::render(frame, content, model),
+        None => home::render(frame, content, model, ui),
     }
 
     if has_footer {
@@ -72,6 +76,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
+    use tokio::time::Instant;
 
     use super::render;
     use super::theme::{BACKGROUND, HIGHLIGHT, SURFACE};
@@ -81,6 +86,7 @@ mod tests {
     use crate::app::interaction::{UiState, apply_key_input, apply_user_action};
     use crate::app::model::AppModel;
     use crate::app::reducer::update;
+    use crate::discovery::{DiscoveredService, DiscoveryEvent};
 
     #[test]
     fn basic_screens_render_at_normal_and_small_sizes() {
@@ -190,6 +196,66 @@ mod tests {
         apply_key_input(&model, &mut ui, KeyInput::Character('/'));
         assert!(!render_with_ui(&model, &ui, 24, 8).is_empty());
         assert!(!render_with_ui(&model, &ui, 1, 1).is_empty());
+    }
+
+    fn browsing_with(names: &[&str]) -> AppModel {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+        for name in names {
+            update(
+                &mut model,
+                AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                    name,
+                    Instant::now(),
+                ))),
+            );
+        }
+        model
+    }
+
+    #[test]
+    fn device_list_renders_sorted_devices_with_untrusted_note_and_highlight() {
+        let model = browsing_with(&["zeta", "alpha"]);
+        let output = render_to_string(&model, 80, 24);
+
+        assert!(output.contains("Devices"));
+        assert!(output.contains("alpha"));
+        assert!(output.contains("zeta"));
+        assert!(output.find("alpha").unwrap() < output.find("zeta").unwrap());
+        assert!(output.contains(":4242"));
+        assert!(output.contains("untrusted"));
+
+        let mut ui = UiState::default();
+        apply_key_input(&model, &mut ui, KeyInput::Down);
+        let backgrounds = render_backgrounds_with_ui(&model, &ui, 80, 24);
+        assert!(backgrounds.contains(&HIGHLIGHT));
+    }
+
+    #[test]
+    fn browsing_empty_state_shows_searching_text() {
+        let model = browsing_with(&[]);
+        let output = render_to_string(&model, 80, 24);
+
+        assert!(output.contains("No devices found"));
+        assert!(output.contains("Searching the local network"));
+        assert!(output.contains("up/down"));
+    }
+
+    #[test]
+    fn direct_address_card_renders_input_and_validation() {
+        let model = browsing_with(&[]);
+        let mut ui = UiState::default();
+        apply_user_action(&mut ui, UserAction::OpenDirectAddress);
+        for character in "peer.local:abc".chars() {
+            apply_key_input(&model, &mut ui, KeyInput::Character(character));
+        }
+
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("Connect to a host:port"));
+        assert!(output.contains("peer.local:abc"));
+        assert!(output.contains("The port must be a number"));
+        assert!(output.contains("enter"));
+        assert!(output.contains("esc"));
     }
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {

@@ -1,6 +1,8 @@
 //! Terminal-independent interaction state and key handling.
 
-use super::action::{KeyInput, UserAction};
+use super::action::{
+    DirectAddressError, DirectEndpoint, KeyInput, MAX_DIRECT_ADDRESS_CHARS, UserAction,
+};
 use super::command_palette::{
     CommandId, MAX_COMMAND_QUERY_CHARS, first_visible, move_selection, reconcile_selection, resolve,
 };
@@ -13,10 +15,34 @@ pub(crate) struct CommandPalette {
     pub(crate) selected: Option<CommandId>,
 }
 
+/// Live direct-address input line and its validation result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectAddressInput {
+    pub(crate) text: String,
+    pub(crate) error: Option<DirectAddressError>,
+}
+
+impl DirectAddressInput {
+    /// Creates an empty input with no error.
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            error: None,
+        }
+    }
+
+    /// Applies one edit and re-validates the whole line.
+    fn edit(&mut self, apply: impl FnOnce(&mut String)) {
+        apply(&mut self.text);
+        self.error = DirectEndpoint::parse(&self.text).err();
+    }
+}
+
 /// A full-screen UI surface drawn above the current screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
     CommandPalette(CommandPalette),
+    DirectAddress(DirectAddressInput),
     Help,
 }
 
@@ -24,12 +50,18 @@ pub(crate) enum Overlay {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UiState {
     overlay: Option<Overlay>,
+    device_selection: Option<super::action::DeviceId>,
 }
 
 impl UiState {
     /// Returns the active overlay, if any.
     pub(crate) const fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
+    }
+
+    /// Returns the currently selected device in the browsing list.
+    pub(crate) const fn device_selection(&self) -> Option<super::action::DeviceId> {
+        self.device_selection
     }
 
     /// Closes any open overlay.
@@ -89,6 +121,26 @@ pub(crate) fn apply_key_input(
             ui.overlay = Some(Overlay::CommandPalette(palette));
             None
         }
+        Some(Overlay::DirectAddress(mut address)) => {
+            match input {
+                KeyInput::Character(character) => {
+                    if address.text.chars().count() < MAX_DIRECT_ADDRESS_CHARS {
+                        address.edit(|text| text.push(character));
+                    }
+                }
+                KeyInput::Backspace => address.edit(|text| {
+                    text.pop();
+                }),
+                KeyInput::Enter => match DirectEndpoint::parse(&address.text) {
+                    Ok(endpoint) => return Some(UserAction::ConnectDirect(endpoint)),
+                    Err(error) => address.error = Some(error),
+                },
+                KeyInput::Escape => return None,
+                _ => {}
+            }
+            ui.overlay = Some(Overlay::DirectAddress(address));
+            None
+        }
         Some(Overlay::Help) => match input {
             KeyInput::Escape => None,
             KeyInput::Character('/') => {
@@ -111,6 +163,13 @@ pub(crate) fn apply_key_input(
             KeyInput::Character(character) if character.eq_ignore_ascii_case(&'q') => {
                 Some(UserAction::Quit)
             }
+            KeyInput::Up | KeyInput::Down if model.capabilities().can_show_devices => {
+                move_device_selection(model, ui, input == KeyInput::Down);
+                None
+            }
+            KeyInput::Enter if model.capabilities().can_show_devices => {
+                resolve_selected_device(model, ui)
+            }
             _ => None,
         },
     }
@@ -130,16 +189,73 @@ pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
             ui.overlay = None;
             true
         }
+        UserAction::OpenDirectAddress => {
+            ui.overlay = Some(Overlay::DirectAddress(DirectAddressInput::new()));
+            true
+        }
         _ => false,
     }
 }
 
-/// Re-validates the palette selection after the application state changed.
+/// Re-validates the UI state after the application model changed.
+///
+/// The palette selection is kept on the first still-visible command, and a
+/// device selection is cleared when its device disappeared from discovery.
 pub(super) fn reconcile(model: &AppModel, ui: &mut UiState) {
-    let Some(Overlay::CommandPalette(palette)) = ui.overlay.as_mut() else {
+    if let Some(Overlay::CommandPalette(palette)) = ui.overlay.as_mut() {
+        palette.selected =
+            reconcile_selection(model.capabilities(), &palette.query, palette.selected);
+    }
+
+    if let Some(selected) = ui.device_selection {
+        let present = model
+            .candidates()
+            .iter()
+            .any(|candidate| candidate.id() == selected);
+        if !present {
+            ui.device_selection = None;
+        }
+    }
+}
+
+/// Moves the browsing selection by one sorted candidate, wrapping at the ends.
+fn move_device_selection(model: &AppModel, ui: &mut UiState, forward: bool) {
+    let candidates = model.sorted_candidates();
+    if candidates.is_empty() {
+        ui.device_selection = None;
         return;
+    }
+
+    let current = ui.device_selection.and_then(|selected| {
+        candidates
+            .iter()
+            .position(|candidate| candidate.id() == selected)
+    });
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1) % candidates.len(),
+        (Some(0), false) | (None, false) => candidates.len() - 1,
+        (None, true) => 0,
+        (Some(index), false) => index - 1,
     };
-    palette.selected = reconcile_selection(model.capabilities(), &palette.query, palette.selected);
+    ui.device_selection = Some(candidates[next].id());
+}
+
+/// Resolves the selected device against the live candidate store.
+///
+/// A stale selection (the device disappeared) resolves to nothing and is
+/// cleared, so a removed device can never be connected through the UI.
+fn resolve_selected_device(model: &AppModel, ui: &mut UiState) -> Option<UserAction> {
+    let selected = ui.device_selection?;
+    if model
+        .candidates()
+        .iter()
+        .any(|candidate| candidate.id() == selected)
+    {
+        Some(UserAction::SelectDevice(selected))
+    } else {
+        ui.device_selection = None;
+        None
+    }
 }
 
 /// Opens the command palette with an empty query and the first command selected.
@@ -151,9 +267,24 @@ fn open_palette(model: &AppModel, ui: &mut UiState) {
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::Instant;
+
     use super::{Overlay, UiState, apply_key_input, apply_user_action, reconcile};
-    use crate::app::action::{KeyInput, UserAction};
+    use crate::app::action::{DirectAddressError, DirectEndpoint, KeyInput, UserAction};
+    use crate::app::failure::FailureKind;
     use crate::app::model::{AppModel, AppState};
+    use crate::discovery::{DiscoveredService, DiscoveryEvent};
+
+    fn browsing_with(names: &[&str]) -> AppModel {
+        let mut model = AppModel::for_test(AppState::Browsing);
+        for name in names {
+            model.apply_discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                name,
+                Instant::now(),
+            )));
+        }
+        model
+    }
 
     #[test]
     fn palette_query_is_bounded_and_q_is_contextual() {
@@ -219,5 +350,169 @@ mod tests {
         assert!(apply_user_action(&mut ui, UserAction::ShowDevices));
         assert_eq!(ui.overlay(), None);
         assert!(!apply_user_action(&mut ui, UserAction::Quit));
+    }
+
+    #[test]
+    fn device_list_navigation_selects_wraps_and_connects() {
+        let model = browsing_with(&["zeta", "alpha"]);
+        let mut ui = UiState::default();
+
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Down), None);
+        let alpha = model.sorted_candidates()[0].id();
+        assert_eq!(ui.device_selection(), Some(alpha));
+
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Down), None);
+        let zeta = model.sorted_candidates()[1].id();
+        assert_eq!(ui.device_selection(), Some(zeta));
+
+        // Navigation wraps at both ends.
+        apply_key_input(&model, &mut ui, KeyInput::Down);
+        assert_eq!(ui.device_selection(), Some(alpha));
+        apply_key_input(&model, &mut ui, KeyInput::Up);
+        assert_eq!(ui.device_selection(), Some(zeta));
+
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::SelectDevice(zeta))
+        );
+
+        // An empty list ignores navigation and cannot dispatch.
+        let empty = browsing_with(&[]);
+        let mut empty_ui = UiState::default();
+        assert_eq!(apply_key_input(&empty, &mut empty_ui, KeyInput::Down), None);
+        assert_eq!(empty_ui.device_selection(), None);
+        assert_eq!(
+            apply_key_input(&empty, &mut empty_ui, KeyInput::Enter),
+            None
+        );
+    }
+
+    #[test]
+    fn removed_device_clears_selection_and_cannot_connect() {
+        let mut model = browsing_with(&["alpha", "beta"]);
+        let mut ui = UiState::default();
+        apply_key_input(&model, &mut ui, KeyInput::Down);
+        assert!(ui.device_selection().is_some());
+
+        model.apply_discovery(DiscoveryEvent::Removed {
+            service_instance: "alpha._lanweave._tcp.local.".to_owned(),
+        });
+        reconcile(&model, &mut ui);
+
+        assert_eq!(ui.device_selection(), None);
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Enter), None);
+
+        // A remaining device can still be selected and connected.
+        apply_key_input(&model, &mut ui, KeyInput::Down);
+        assert_eq!(
+            ui.device_selection(),
+            Some(model.sorted_candidates()[0].id())
+        );
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::SelectDevice(model.sorted_candidates()[0].id()))
+        );
+    }
+
+    #[test]
+    fn selection_survives_unrelated_updates_and_list_keys_are_ignored_outside_browsing() {
+        let mut model = browsing_with(&["alpha"]);
+        let mut ui = UiState::default();
+        apply_key_input(&model, &mut ui, KeyInput::Down);
+        let alpha = ui.device_selection().unwrap();
+
+        model.apply_discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+            "beta",
+            Instant::now(),
+        )));
+        reconcile(&model, &mut ui);
+        assert_eq!(ui.device_selection(), Some(alpha));
+
+        for state in [
+            AppState::Starting,
+            AppState::PairingOutbound,
+            AppState::SessionIdle,
+            AppState::Error(FailureKind::Internal),
+        ] {
+            let mut busy = AppModel::for_test(state);
+            busy.apply_discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                "peer",
+                Instant::now(),
+            )));
+            let mut busy_ui = UiState::default();
+
+            assert_eq!(apply_key_input(&busy, &mut busy_ui, KeyInput::Down), None);
+            assert_eq!(busy_ui.device_selection(), None, "state: {state:?}");
+            assert_eq!(
+                apply_key_input(&busy, &mut busy_ui, KeyInput::Enter),
+                None,
+                "state: {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_address_input_bounds_validates_and_dispatches() {
+        let model = browsing_with(&[]);
+        let mut ui = UiState::default();
+        assert!(apply_user_action(&mut ui, UserAction::OpenDirectAddress));
+
+        // Input is bounded.
+        for _ in 0..super::MAX_DIRECT_ADDRESS_CHARS + 20 {
+            apply_key_input(&model, &mut ui, KeyInput::Character('x'));
+        }
+        let Some(Overlay::DirectAddress(input)) = ui.overlay() else {
+            panic!("the input overlay should remain open");
+        };
+        assert_eq!(input.text.chars().count(), super::MAX_DIRECT_ADDRESS_CHARS);
+
+        // Empty input reports a missing host and never dispatches.
+        for _ in 0..super::MAX_DIRECT_ADDRESS_CHARS {
+            apply_key_input(&model, &mut ui, KeyInput::Backspace);
+        }
+        apply_key_input(&model, &mut ui, KeyInput::Enter);
+        let Some(Overlay::DirectAddress(input)) = ui.overlay() else {
+            panic!("the input overlay should remain open");
+        };
+        assert_eq!(input.error, Some(DirectAddressError::MissingHost));
+
+        // A host without a port reports a missing port.
+        for character in "peer.local".chars() {
+            apply_key_input(&model, &mut ui, KeyInput::Character(character));
+        }
+        let Some(Overlay::DirectAddress(input)) = ui.overlay() else {
+            panic!("the input overlay should remain open");
+        };
+        assert_eq!(input.error, Some(DirectAddressError::MissingPort));
+
+        // An invalid port blocks Enter.
+        for character in ":abc".chars() {
+            apply_key_input(&model, &mut ui, KeyInput::Character(character));
+        }
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Enter), None);
+        let Some(Overlay::DirectAddress(input)) = ui.overlay() else {
+            panic!("the input overlay should remain open");
+        };
+        assert_eq!(input.error, Some(DirectAddressError::InvalidPort));
+
+        // A valid address dispatches and closes the overlay.
+        for _ in 0..3 {
+            apply_key_input(&model, &mut ui, KeyInput::Backspace);
+        }
+        for character in "4242".chars() {
+            apply_key_input(&model, &mut ui, KeyInput::Character(character));
+        }
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::ConnectDirect(
+                DirectEndpoint::parse("peer.local:4242").unwrap()
+            ))
+        );
+        assert_eq!(ui.overlay(), None);
+
+        // Escape closes the overlay without dispatching.
+        apply_user_action(&mut ui, UserAction::OpenDirectAddress);
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Escape), None);
+        assert_eq!(ui.overlay(), None);
     }
 }

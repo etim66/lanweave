@@ -38,13 +38,15 @@ Discovery records do not contain pairing codes, identity fingerprints, file meta
 
 ## Device List
 
-The TUI combines records for the same service instance and shows a bounded list of current candidates. It removes stale and goodbye records. Selecting a device starts a new connection and sends a pairing request; it does not mark that device as trusted.
+The TUI combines records for the same service instance and shows a bounded, sorted list of current candidates. Sorting is deterministic: case-insensitive display name, then a stable store-assigned id so equal names keep discovery order. It removes stale and goodbye records.
+
+Selecting a device starts a new connection and sends a pairing request; it does not mark that device as trusted. Up/Down move the selection and Enter connects. The selection follows its device across updates and is cleared when that device disappears, so a removed device can never be connected through stale UI state. Device names and addresses are shown with an untrusted marker and are never presented as verified identity.
 
 Implementations must safely handle duplicate records, name conflicts, multiple interfaces, IPv4, scoped IPv6, changing addresses, and blocked multicast. Record counts, text lengths, retained candidates, resolution work, and connection attempts are bounded.
 
 ## Direct Address
 
-A user may enter a host or IP address and port when multicast discovery is unavailable. Direct addressing skips only mDNS. It still requires the same pairing request, acceptance, one-time code, authorization, and transfer approval flow.
+A user may enter a host or IP address and port when multicast discovery is unavailable. `/connect` opens the input; the address is validated live and the connection can only start after the input parses as a host (no whitespace or control bytes, at most 255 bytes) and a port (one to five decimal digits in 1..=65535). Direct addressing skips only mDNS. It still requires the same pairing request, acceptance, one-time code, authorization, and transfer approval flow.
 
 Discovered and direct routes feed the same application connection effect. The direct-address input and complete validation UI are added with device selection rather than creating a separate transport path.
 

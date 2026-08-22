@@ -389,6 +389,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_list_connects_once_and_stale_selection_never_does() {
+        let (event_sender, event_receiver) = event_channel();
+        let (effect_sender, mut effect_receiver) = effect_channel();
+
+        event_sender.send(AppEvent::StartupCompleted).await.unwrap();
+        event_sender
+            .send(AppEvent::Discovery(DiscoveryEvent::Resolved(
+                DiscoveredService::for_test("peer", Instant::now()),
+            )))
+            .await
+            .unwrap();
+        event_sender
+            .send(AppEvent::KeyInput(KeyInput::Down))
+            .await
+            .unwrap();
+        event_sender
+            .send(AppEvent::Discovery(DiscoveryEvent::Removed {
+                service_instance: "peer._lanweave._tcp.local.".to_owned(),
+            }))
+            .await
+            .unwrap();
+        event_sender
+            .send(AppEvent::KeyInput(KeyInput::Enter))
+            .await
+            .unwrap();
+
+        // The removed device cannot connect; a fresh record can, exactly once.
+        event_sender
+            .send(AppEvent::Discovery(DiscoveryEvent::Resolved(
+                DiscoveredService::for_test("peer", Instant::now()),
+            )))
+            .await
+            .unwrap();
+        for input in [KeyInput::Down, KeyInput::Enter] {
+            event_sender.send(AppEvent::KeyInput(input)).await.unwrap();
+        }
+        drop(event_sender);
+
+        let model = AppRuntime::new(event_receiver, effect_sender)
+            .run()
+            .await
+            .unwrap();
+
+        // The reappeared device gets a fresh id (2) and connects once.
+        assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(
+            effect_receiver.recv().await,
+            Some(Effect::Connect(
+                crate::app::action::ConnectionTarget::Discovered(DeviceId::new(2))
+            ))
+        );
+        assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
+        assert_eq!(effect_receiver.recv().await, None);
+    }
+
+    #[tokio::test]
     async fn observer_error_stops_the_runtime() {
         let (_event_sender, event_receiver) = event_channel();
         let (effect_sender, mut effect_receiver) = effect_channel();

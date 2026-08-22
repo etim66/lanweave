@@ -32,6 +32,10 @@ The app is interactive rather than a set of one-shot shell commands.
   Enter to run a command, Backspace to edit, and Escape to close it.
 - Use `/help` to show command and keyboard help.
 - Use `/devices` to open the list of devices currently running Lanweave.
+- In the device list, use Up/Down to select a device and Enter to connect.
+  Listed device names are untrusted until pairing confirms the live connection.
+- Use `/connect` to enter a `host:port` directly when discovery is unavailable.
+  The input validates the address before a connection can start.
 - Paste one or more file paths into the file area, review them, and select **Send**.
 - `/send` is available only in an authorized idle session. `/disconnect` is
   available only while connected, and `/quit` closes Lanweave.
