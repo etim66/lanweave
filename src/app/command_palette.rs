@@ -11,6 +11,7 @@ pub(crate) const MAX_COMMAND_QUERY_CHARS: usize = 64;
 pub(crate) enum CommandId {
     Help,
     Devices,
+    Connect,
     Send,
     Disconnect,
     Quit,
@@ -35,7 +36,7 @@ pub(crate) struct CommandSpec {
 }
 
 /// The complete slash command table, in display order.
-const COMMANDS: [CommandSpec; 5] = [
+const COMMANDS: [CommandSpec; 6] = [
     CommandSpec {
         id: CommandId::Help,
         name: "/help",
@@ -49,6 +50,13 @@ const COMMANDS: [CommandSpec; 5] = [
         description: "Show devices currently running Lanweave",
         availability: devices_availability,
         action: UserAction::ShowDevices,
+    },
+    CommandSpec {
+        id: CommandId::Connect,
+        name: "/connect",
+        description: "Connect to a host:port directly",
+        availability: devices_availability,
+        action: UserAction::OpenDirectAddress,
     },
     CommandSpec {
         id: CommandId::Send,
@@ -215,14 +223,15 @@ mod tests {
             .map(|command| command.name)
             .collect::<HashSet<_>>();
 
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands.len(), 6);
         assert_eq!(names.len(), commands.len());
         assert!(commands.iter().all(|command| command.name.starts_with('/')));
         assert_eq!(commands[0].action, UserAction::ShowHelp);
         assert_eq!(commands[1].action, UserAction::ShowDevices);
-        assert_eq!(commands[2].action, UserAction::StartTransfer);
-        assert_eq!(commands[3].action, UserAction::Disconnect);
-        assert_eq!(commands[4].action, UserAction::Quit);
+        assert_eq!(commands[2].action, UserAction::OpenDirectAddress);
+        assert_eq!(commands[3].action, UserAction::StartTransfer);
+        assert_eq!(commands[4].action, UserAction::Disconnect);
+        assert_eq!(commands[5].action, UserAction::Quit);
     }
 
     #[test]
@@ -249,6 +258,15 @@ mod tests {
                 } else {
                     CommandAvailability::Hidden
                 }
+            );
+            assert_eq!(
+                availability(CommandId::Connect),
+                if state == AppState::Browsing {
+                    CommandAvailability::Enabled
+                } else {
+                    CommandAvailability::Hidden
+                },
+                "state: {state:?}"
             );
             assert_eq!(
                 availability(CommandId::Send),
@@ -298,6 +316,11 @@ mod tests {
         let busy = AppModel::for_test(AppState::OutboundProposal).capabilities();
         assert_eq!(resolve(busy, "send", Some(CommandId::Send)), None);
         assert_eq!(resolve(session, "help", Some(CommandId::Quit)), None);
+        assert_eq!(
+            resolve(browsing, "connect", Some(CommandId::Connect)),
+            Some(UserAction::OpenDirectAddress)
+        );
+        assert_eq!(resolve(session, "connect", Some(CommandId::Connect)), None);
 
         assert_eq!(
             move_selection(browsing, "", Some(CommandId::Quit), true),

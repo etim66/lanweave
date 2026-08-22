@@ -75,6 +75,22 @@ impl CandidateStore {
         &self.candidates
     }
 
+    /// Returns candidates in deterministic display order.
+    ///
+    /// Sorting is case-insensitive by display name with the stable id as the
+    /// tie-breaker, so equal names keep discovery order and the result never
+    /// changes without a discovery event.
+    pub(crate) fn sorted_candidates(&self) -> Vec<&Candidate> {
+        let mut sorted: Vec<&Candidate> = self.candidates.iter().collect();
+        sorted.sort_by(|left, right| {
+            left.display_name
+                .to_ascii_lowercase()
+                .cmp(&right.display_name.to_ascii_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        sorted
+    }
+
     /// Returns the candidate with the given id, if present.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn candidate(&self, id: DeviceId) -> Option<&Candidate> {
@@ -161,7 +177,8 @@ mod tests {
 
     use super::CandidateStore;
     use crate::discovery::{
-        DiscoveredService, DiscoveryEvent, InterfaceScope, MAX_CANDIDATES, ScopedAddress,
+        DiscoveredService, DiscoveryEvent, InterfaceScope, MAX_CANDIDATES, SERVICE_TYPE,
+        ScopedAddress,
     };
 
     fn service(name: &str, address: Ipv4Addr, observed_at: Instant) -> DiscoveredService {
@@ -171,6 +188,25 @@ mod tests {
             format!("{name}.local."),
             vec![ScopedAddress::new(
                 IpAddr::V4(address),
+                InterfaceScope::new("eth0", 2),
+            )],
+            4242,
+            observed_at,
+        )
+        .unwrap()
+    }
+
+    fn service_with_names(
+        instance: &str,
+        display: &str,
+        observed_at: Instant,
+    ) -> DiscoveredService {
+        DiscoveredService::new(
+            format!("{instance}.{SERVICE_TYPE}"),
+            display.to_owned(),
+            format!("{instance}.local."),
+            vec![ScopedAddress::new(
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 InterfaceScope::new("eth0", 2),
             )],
             4242,
@@ -269,6 +305,52 @@ mod tests {
                 .candidates()
                 .iter()
                 .any(|candidate| candidate.display_name() == "new-peer")
+        );
+    }
+
+    #[test]
+    fn sorted_candidates_are_ordered_case_insensitively_with_stable_id_ties() {
+        let now = Instant::now();
+        let mut store = CandidateStore::new();
+        store.apply(DiscoveryEvent::Resolved(service_with_names(
+            "zulu-instance",
+            "Zulu",
+            now,
+        )));
+        store.apply(DiscoveryEvent::Resolved(service_with_names(
+            "alpha-instance",
+            "alpha",
+            now,
+        )));
+        store.apply(DiscoveryEvent::Resolved(service_with_names(
+            "first-peer",
+            "peer",
+            now,
+        )));
+        store.apply(DiscoveryEvent::Resolved(service_with_names(
+            "second-peer",
+            "peer",
+            now,
+        )));
+
+        let sorted = store.sorted_candidates();
+        let names = sorted
+            .iter()
+            .map(|candidate| candidate.display_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["alpha", "peer", "peer", "Zulu"]);
+
+        // Equal names keep discovery order through the stable id, and the
+        // store itself is never reordered by sorting.
+        assert_eq!(sorted[1].id(), store.candidates()[2].id());
+        assert_eq!(sorted[2].id(), store.candidates()[3].id());
+        assert_eq!(
+            store
+                .candidates()
+                .iter()
+                .map(|candidate| candidate.display_name())
+                .collect::<Vec<_>>(),
+            ["Zulu", "alpha", "peer", "peer"]
         );
     }
 }

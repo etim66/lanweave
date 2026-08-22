@@ -162,6 +162,11 @@ impl AppModel {
         self.candidates.candidates()
     }
 
+    /// Returns candidates in deterministic display order.
+    pub(crate) fn sorted_candidates(&self) -> Vec<&Candidate> {
+        self.candidates.sorted_candidates()
+    }
+
     /// Returns the interaction capabilities of the current state.
     pub(crate) fn capabilities(&self) -> AppCapabilities {
         let state = self.state;
