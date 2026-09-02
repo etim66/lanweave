@@ -623,8 +623,9 @@ fn decode_sha256(encoded: &str) -> Result<[u8; 32], MessageError> {
     {
         return Err(invalid());
     }
+    let (pairs, _) = bytes.as_chunks::<2>();
     let mut digest = [0; 32];
-    for (pair, byte) in bytes.chunks_exact(2).zip(&mut digest) {
+    for (pair, byte) in pairs.iter().zip(&mut digest) {
         let text = std::str::from_utf8(pair).map_err(|_| invalid())?;
         *byte = u8::from_str_radix(text, 16).map_err(|_| invalid())?;
     }
