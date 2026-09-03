@@ -1,0 +1,28 @@
+# Fuzz harness crate for the Lanweave wire codecs.
+#
+# Built with `cargo fuzz` (nightly) and deliberately excluded from the main
+# crate's workspace, CI, and lockfile. The `lanweave` dependency enables the
+# `fuzz` feature, which compiles the `fuzzing` re-export shim in lib.rs.
+# Deterministic corpus tests for the same codecs run in normal CI from the
+# unit test suite.
+
+[package]
+name = "lanweave-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+libfuzzer-sys = "0.4"
+lanweave = { path = "..", features = ["fuzz"] }
+
+[[bin]]
+name = "frame_codec"
+path = "fuzz_targets/frame_codec.rs"
+test = false
+doc = false
+bench = false
