@@ -14,6 +14,10 @@ allow = [
     "Unicode-3.0",
     # Permissive license used by Ratatui's transitive foldhash dependency.
     "Zlib",
+    # Permissive license used by the rustls TLS stack (rustls-webpki, untrusted).
+    "ISC",
+    # Permissive license used by the subtle constant-time primitive library.
+    "BSD-3-Clause",
 ]
 confidence-threshold = 0.8
 

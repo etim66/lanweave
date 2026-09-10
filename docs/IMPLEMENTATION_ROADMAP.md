@@ -30,10 +30,12 @@ Implement strict JSON controls, binary frames, incremental parsing, bounded queu
 
 Exit criteria:
 
-- Golden and malformed-input tests cover every message and frame boundary.
-- Partial and combined socket reads behave identically.
-- TLS uses a fresh connection identity and disables resumption and early data.
-- One writer prevents frame interleaving and unbounded queues.
+- Golden and malformed-input tests cover every message and frame boundary. ✅
+- Partial and combined socket reads behave identically. ✅
+- TLS uses a fresh connection identity and disables resumption and early data. ✅
+- One writer prevents frame interleaving and unbounded queues. ✅
+
+Status: implemented. The framed connection, the single bounded ordered writer, and the provisional TLS 1.3 profile (ALPN `lanweave/1`, fresh P-256 responder certificate, disabled resumption and early data, 32-byte exporter) live in the crate-internal `transport` module; the session owner wires them into the application in Gate 4.
 
 ## Gate 4: Pairing Request And Authorization
 

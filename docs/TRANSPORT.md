@@ -25,14 +25,14 @@ The code is not sent on the connection. Pairing output is used for confirmation,
 
 ## Rust Mapping
 
-The current implementation candidates are:
+The implementation uses the `ring` crypto provider with SSL-over-1.3-only configuration:
 
-- `rustls` 0.23 with an explicitly selected crypto provider;
-- `tokio-rustls` 0.26;
-- `rcgen` 0.14; and
-- `zeroize` for best-effort cleanup.
+- `rustls` 0.23 selected with the `std` and `ring` features (the `tls12` feature is off, so TLS 1.2 is unsupported at compile time);
+- `tokio-rustls` 0.26 with the `ring` feature;
+- `rcgen` 0.14 for the fresh P-256 certificate per connection; and
+- `zeroize` for best-effort cleanup of the exporter.
 
-The exact versions must be checked again before implementation. Release builds must disable key logging. The pairing dependency is still a research gate; see [Cryptography](CRYPTOGRAPHY.md).
+Release builds must disable key logging. The pairing dependency is still a research gate; see [Cryptography](CRYPTOGRAPHY.md).
 
 ## Stream And Framing
 
