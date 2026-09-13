@@ -46,12 +46,21 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
     let effect = match (model.state(), action) {
         (_, UserAction::ShowHelp | UserAction::ShowDevices) => None,
         (AppState::Browsing, UserAction::SelectDevice(device)) => {
-            model.transition_to(AppState::PairingOutbound);
-            Some(Effect::Connect(ConnectionTarget::Discovered(device)))
+            // The device is resolved against the live store, so a removed
+            // device can never start a connection through stale UI state.
+            if let Some(target) = model.discovered_target(device) {
+                model.set_pairing_peer(target.pairing_peer());
+                model.transition_to(AppState::PairingOutbound);
+                Some(Effect::Connect(target))
+            } else {
+                None
+            }
         }
         (AppState::Browsing, UserAction::ConnectDirect(endpoint)) => {
+            let target = ConnectionTarget::Direct(endpoint);
+            model.set_pairing_peer(target.pairing_peer());
             model.transition_to(AppState::PairingOutbound);
-            Some(Effect::Connect(ConnectionTarget::Direct(endpoint)))
+            Some(Effect::Connect(target))
         }
         (AppState::PairingInbound, UserAction::AcceptPairing) => {
             model.transition_to(AppState::PairingInboundAccepted);
@@ -60,6 +69,10 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
         (AppState::PairingInbound, UserAction::RejectPairing) => {
             model.transition_to(AppState::ClosingPairing);
             Some(Effect::RejectPairing)
+        }
+        (AppState::PairingOutboundAccepted, UserAction::SubmitPairingCode(code)) => {
+            model.transition_to(AppState::PairingConfirming);
+            Some(Effect::SubmitPairingCode(code))
         }
         (AppState::SessionIdle, UserAction::StartTransfer) => {
             model.transition_to(AppState::OutboundProposal);
@@ -97,18 +110,33 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.transition_to(AppState::Browsing);
             None
         }
-        (AppState::Browsing, AppEvent::IncomingPairingRequest) => {
+        (AppState::Browsing, AppEvent::IncomingPairingRequest(peer)) => {
+            model.set_pairing_peer(peer);
             model.transition_to(AppState::PairingInbound);
             None
         }
+        (AppState::PairingOutbound, AppEvent::PairingAccepted) => {
+            // The code arrives only after acceptance, never before it.
+            model.transition_to(AppState::PairingOutboundAccepted);
+            None
+        }
+        (AppState::PairingInboundAccepted, AppEvent::PairingCodeIssued(code)) => {
+            model.set_pairing_code(code);
+            None
+        }
         (
-            AppState::PairingOutbound | AppState::PairingInboundAccepted,
+            AppState::PairingOutbound
+            | AppState::PairingOutboundAccepted
+            | AppState::PairingConfirming
+            | AppState::PairingInboundAccepted,
             AppEvent::PairingSucceeded,
         ) => {
+            model.clear_pairing();
             model.transition_to(AppState::SessionIdle);
             None
         }
         (state, AppEvent::PairingEnded) if state.is_pairing() => {
+            model.clear_pairing();
             model.transition_to(AppState::Browsing);
             None
         }
@@ -136,14 +164,19 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.transition_to(AppState::SessionIdle);
             None
         }
-        (state, AppEvent::IncomingPairingRequest) if state.is_pairing() || state.has_session() => {
+        // A second request cannot be shown while a connection is busy.
+        (state, AppEvent::IncomingPairingRequest(_))
+            if state.is_pairing() || state.has_session() =>
+        {
             Some(Effect::RejectPairingBusy)
         }
         (state, AppEvent::SessionClosed) if state.is_pairing() || state.has_session() => {
+            model.clear_pairing();
             model.transition_to(AppState::Browsing);
             None
         }
         (state, AppEvent::Failed(kind)) if !matches!(state, AppState::Error(_)) => {
+            model.clear_pairing();
             model.transition_to(AppState::Error(kind));
             None
         }
@@ -170,17 +203,36 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{MAX_EFFECTS_PER_EVENT, update};
-    use crate::app::action::{ConnectionTarget, DeviceId, DirectEndpoint, UserAction};
+    use crate::app::action::{ConnectionTarget, DeviceId, DirectEndpoint, PairingPeer, UserAction};
     use crate::app::event::{AppEvent, Effect};
     use crate::app::failure::FailureKind;
     use crate::app::model::{AppModel, AppState};
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
+    use crate::pairing::PairingCode;
 
     const DEVICE: DeviceId = DeviceId::new(7);
+
+    fn peer() -> PairingPeer {
+        PairingPeer::new(Some("peer".to_owned()), "127.0.0.1:4242".to_owned())
+    }
+
+    fn code(digits: &str) -> PairingCode {
+        PairingCode::parse(digits).expect("test code is eight digits")
+    }
 
     fn model_in(state: AppState) -> AppModel {
         let mut model = AppModel::new();
         model.transition_to(state);
+        model
+    }
+
+    /// A browsing model with one live discovered candidate.
+    fn browsing_with_device() -> AppModel {
+        let mut model = model_in(AppState::Browsing);
+        model.apply_discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+            "peer",
+            Instant::now(),
+        )));
         model
     }
 
@@ -195,15 +247,21 @@ mod tests {
             ),
             (
                 AppState::Browsing,
-                AppEvent::User(UserAction::SelectDevice(DEVICE)),
-                AppState::PairingOutbound,
-                Some(Effect::Connect(ConnectionTarget::Discovered(DEVICE))),
-            ),
-            (
-                AppState::Browsing,
-                AppEvent::IncomingPairingRequest,
+                AppEvent::IncomingPairingRequest(peer()),
                 AppState::PairingInbound,
                 None,
+            ),
+            (
+                AppState::PairingOutbound,
+                AppEvent::PairingAccepted,
+                AppState::PairingOutboundAccepted,
+                None,
+            ),
+            (
+                AppState::PairingOutboundAccepted,
+                AppEvent::User(UserAction::SubmitPairingCode(code("12345678"))),
+                AppState::PairingConfirming,
+                Some(Effect::SubmitPairingCode(code("12345678"))),
             ),
             (
                 AppState::PairingInbound,
@@ -237,7 +295,7 @@ mod tests {
             ),
             (
                 AppState::SessionIdle,
-                AppEvent::IncomingPairingRequest,
+                AppEvent::IncomingPairingRequest(peer()),
                 AppState::SessionIdle,
                 Some(Effect::RejectPairingBusy),
             ),
@@ -326,7 +384,20 @@ mod tests {
     }
 
     #[test]
-    fn device_selection_only_starts_a_connection_while_browsing() {
+    fn device_selection_resolves_once_and_stores_the_peer() {
+        let mut model = browsing_with_device();
+        let device = model.sorted_candidates()[0].id();
+
+        assert_eq!(
+            update(&mut model, AppEvent::User(UserAction::SelectDevice(device))),
+            vec![Effect::Connect(ConnectionTarget::Discovered {
+                address: "127.0.0.1:4242".parse().unwrap(),
+                display_name: "peer".to_owned(),
+            })]
+        );
+        assert_eq!(model.state(), AppState::PairingOutbound);
+        assert_eq!(model.pairing_peer().unwrap().display_name(), Some("peer"));
+
         for state in all_states() {
             if state == AppState::Browsing {
                 continue;
@@ -338,6 +409,18 @@ mod tests {
             assert_eq!(model.state(), state, "state: {state:?}");
             assert!(effects.is_empty(), "state: {state:?}");
         }
+    }
+
+    #[test]
+    fn removed_devices_cannot_start_a_connection() {
+        let mut model = browsing_with_device();
+        let device = model.sorted_candidates()[0].id();
+        model.apply_discovery(DiscoveryEvent::Removed {
+            service_instance: "peer._lanweave._tcp.local.".to_owned(),
+        });
+
+        assert!(update(&mut model, AppEvent::User(UserAction::SelectDevice(device))).is_empty());
+        assert_eq!(model.state(), AppState::Browsing);
     }
 
     #[test]
@@ -387,6 +470,10 @@ mod tests {
         let cases = [
             (UserAction::AcceptPairing, AppState::PairingInbound),
             (UserAction::RejectPairing, AppState::PairingInbound),
+            (
+                UserAction::SubmitPairingCode(code("12345678")),
+                AppState::PairingOutboundAccepted,
+            ),
             (UserAction::AcceptTransfer, AppState::InboundProposal),
             (UserAction::RejectTransfer, AppState::InboundProposal),
         ];
@@ -414,6 +501,7 @@ mod tests {
             (AppState::PairingOutbound, AppEvent::TransferFinished),
             (AppState::SessionIdle, AppEvent::TransferStarted),
             (AppState::Browsing, AppEvent::SessionClosed),
+            (AppState::Browsing, AppEvent::PairingAccepted),
         ];
 
         for (state, event) in cases {
@@ -422,6 +510,33 @@ mod tests {
             assert!(update(&mut model, event).is_empty());
             assert_eq!(model.state(), state);
         }
+    }
+
+    #[test]
+    fn pairing_data_is_stored_and_cleared_with_the_flow() {
+        let mut model = browsing_with_device();
+        let device = model.sorted_candidates()[0].id();
+        update(&mut model, AppEvent::User(UserAction::SelectDevice(device)));
+        update(&mut model, AppEvent::PairingSucceeded);
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.pairing_peer().is_none());
+
+        // The responder keeps the generated code until the flow ends.
+        let mut model = model_in(AppState::PairingInboundAccepted);
+        update(&mut model, AppEvent::PairingCodeIssued(code("00000042")));
+        assert_eq!(
+            model.pairing_code().unwrap().grouped(),
+            "0000 0042".to_owned()
+        );
+        update(&mut model, AppEvent::SessionClosed);
+        assert_eq!(model.state(), AppState::Browsing);
+        assert!(model.pairing_code().is_none());
+
+        // A failure clears pairing state before showing the error screen.
+        let mut model = model_in(AppState::PairingConfirming);
+        update(&mut model, AppEvent::Failed(FailureKind::Pairing));
+        assert_eq!(model.state(), AppState::Error(FailureKind::Pairing));
+        assert!(model.pairing_peer().is_none() && model.pairing_code().is_none());
     }
 
     #[test]
@@ -528,7 +643,9 @@ mod tests {
 
         for event in [
             AppEvent::StartupCompleted,
-            AppEvent::IncomingPairingRequest,
+            AppEvent::IncomingPairingRequest(peer()),
+            AppEvent::PairingAccepted,
+            AppEvent::PairingCodeIssued(code("12345678")),
             AppEvent::PairingSucceeded,
             AppEvent::IncomingTransferRequest,
             AppEvent::TransferStarted,
@@ -553,7 +670,7 @@ mod tests {
             let mut model = model_in(state);
 
             assert_eq!(
-                update(&mut model, AppEvent::IncomingPairingRequest),
+                update(&mut model, AppEvent::IncomingPairingRequest(peer())),
                 vec![Effect::RejectPairingBusy],
                 "state: {state:?}"
             );
@@ -594,13 +711,15 @@ mod tests {
         }
     }
 
-    fn all_states() -> [AppState; 15] {
+    fn all_states() -> [AppState; 17] {
         [
             AppState::Starting,
             AppState::Browsing,
             AppState::PairingOutbound,
+            AppState::PairingOutboundAccepted,
             AppState::PairingInbound,
             AppState::PairingInboundAccepted,
+            AppState::PairingConfirming,
             AppState::ClosingPairing,
             AppState::SessionIdle,
             AppState::OutboundProposal,

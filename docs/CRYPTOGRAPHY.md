@@ -6,6 +6,10 @@ The version 1 profile is a design target, not an approval. Lanweave has no audit
 
 Release is blocked until specialists review the password mapping, TLS and pairing composition, certificate verifier, test vectors, dependency tree, and implementation. Lanweave must not implement elliptic-curve group arithmetic itself.
 
+## Implementation Status
+
+The current pairing adapter is a prototype around the unaudited `pakery-spake2` and `pakery-crypto` crates, selected because they implement the fixed RFC 9382 P-256/SHA-256/HKDF/HMAC ciphersuite and its point validation. The adapter is wired into the live flow so the MVP can be exercised end to end; the release gate above stays open until independent review accepts the dependency, the password mapping, and the exporter/hello binding composition.
+
 ## Fixed Pairing Profile
 
 The current target is RFC 9382 SPAKE2-P256-SHA256-HKDF-HMAC over TLS 1.3. The pairing initiator is Party A and the pairing responder is Party B. Transfer direction does not affect these roles.
@@ -34,7 +38,7 @@ The code:
 
 Anyone who sees the live code may be able to pair. Users must show it through a private channel, such as reading it directly from the other screen.
 
-The application-specific password-to-scalar mapping remains a specialist-review item. Leading zeroes must be part of the exact password bytes.
+The prototype maps the eight digits to the password scalar as `w = OS2IP(digits) mod n`, which is injective over the ten-million-value code space and keeps leading zeroes significant. The application-specific password-to-scalar mapping remains a specialist-review item.
 
 ## TLS Profile
 
@@ -55,7 +59,7 @@ exact responder hello JSON body
 
 Each field is length-prefixed. The exact JSON bytes are used without reformatting. Each `hello` body is limited to 4,000 bytes.
 
-This binding is intended to stop an intermediary from completing pairing across two different TLS connections. The composition requires specialist review and adversarial tests before release.
+The implementation builds the additional authenticated data as a big-endian `u32` length followed by each field: the fixed label `lanweave-v1-pairing`, the exporter, the initiator hello body, and the responder hello body. The adapter passes this value as the SPAKE2 AAD, which RFC 9382 mixes into the confirmation-key derivation. This binding is intended to stop an intermediary from completing pairing across two different TLS connections. The composition requires specialist review and adversarial tests before release.
 
 ## Exchange
 

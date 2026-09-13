@@ -48,6 +48,14 @@ Exit criteria:
 - Pairing is bound to the current TLS connection.
 - Independent audit and specialist review clear the release gate.
 
+Status: implemented as a prototype. The session owner completes TLS, `hello`,
+`pair_request`/`pair_response`, the one-time code, and the four SPAKE2 records
+bound to the TLS exporter and the exact hello bodies. A session reaches
+authorized idle only after both confirmations verify, and a rejected, timed
+out, or failed pairing closes the provisional connection with no code state.
+The pairing dependency, password mapping, and composition review remain
+release-blocking; see [`CRYPTOGRAPHY.md`](CRYPTOGRAPHY.md).
+
 ## Gate 5: Local And Network File Transfer
 
 Implement pasted path parsing, manifest review, destination safety, sequential streaming, verification, progress, and cleanup.

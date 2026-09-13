@@ -17,6 +17,9 @@ use tokio::time::Instant;
 pub(crate) use listener::LocalListener;
 pub(crate) use mdns::MdnsDiscoveryService;
 pub(crate) use store::{Candidate, CandidateStore};
+// Shared so pairing prompts and hello display names are escaped before they
+// can reach any renderer.
+pub(crate) use text::escape_display;
 
 /// mDNS service type advertised and browsed by Lanweave.
 pub(crate) const SERVICE_TYPE: &str = "_lanweave._tcp.local.";

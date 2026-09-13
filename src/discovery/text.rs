@@ -4,7 +4,7 @@ const MAX_DISPLAY_BYTES: usize = 128;
 /// Escapes controls and bidi characters for safe display, bounded by bytes.
 ///
 /// Long output is cut with a trailing ellipsis at a UTF-8 boundary.
-pub(super) fn escape_display(input: &str) -> String {
+pub(crate) fn escape_display(input: &str) -> String {
     let mut output = String::new();
 
     for character in input.chars() {

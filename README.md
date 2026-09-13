@@ -5,7 +5,7 @@
 
 Lanweave is a terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
-Lanweave is currently a work in progress. The basic TUI shell, live discovery, and temporary advertised TCP listener are available, while connection handling, security, and file transfer are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
+Lanweave is currently a work in progress. The TUI shell, live discovery, the provisional TLS 1.3 connection, and the pairing request and one-time-code authorization flow are available. File transfer and the remaining session features are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
 
 ## How It Works
 
@@ -36,6 +36,11 @@ The app is interactive rather than a set of one-shot shell commands.
   Listed device names are untrusted until pairing confirms the live connection.
 - Use `/connect` to enter a `host:port` directly when discovery is unavailable.
   The input validates the address before a connection can start.
+- When the peer's app shows your pairing request, press Enter to accept or
+  Escape to reject it. The peer name and address are untrusted.
+- If the peer accepts, they read the eight-digit code from their screen and you
+  type it: digits to enter, Backspace to edit, Enter to submit, Escape to
+  cancel. The code expires after about two minutes.
 - Paste one or more file paths into the file area, review them, and select **Send**.
 - `/send` is available only in an authorized idle session. `/disconnect` is
   available only while connected, and `/quit` closes Lanweave.
@@ -75,7 +80,7 @@ Likely dependency families include:
 - `sha2` for file checks; and
 - `zeroize` for best-effort secret cleanup.
 
-The pairing library is not yet selected. Lanweave must not implement cryptographic group arithmetic itself. See [Cryptography](docs/CRYPTOGRAPHY.md) for the release-blocking security work.
+The pairing adapter wraps an RFC 9382 SPAKE2-P256-SHA256-HKDF-HMAC implementation (`pakery-spake2` with `pakery-crypto`) as an unaudited prototype. Lanweave must not implement cryptographic group arithmetic itself. See [Cryptography](docs/CRYPTOGRAPHY.md) for the release-blocking security work.
 
 ## Building
 
@@ -114,7 +119,7 @@ Run `make check` for the formatting, lint, and test gate used during normal deve
 
 ## Security Status
 
-Lanweave is incomplete and has not been audited. It is not safe for sensitive files. The planned pairing and TLS design still needs specialist review, test vectors, dependency review, and an audited RFC-conformant pairing implementation.
+Lanweave is incomplete and has not been audited. It is not safe for sensitive files. The pairing adapter is an unaudited prototype around `pakery-spake2`/`pakery-crypto`; the pairing and TLS design still needs specialist review, test vectors, dependency review, and an audited RFC-conformant pairing implementation.
 
 ## Contributing And Licence
 

@@ -1,12 +1,15 @@
 //! Terminal-independent interaction state and key handling.
 
+use std::fmt;
+
 use super::action::{
     DirectAddressError, DirectEndpoint, KeyInput, MAX_DIRECT_ADDRESS_CHARS, UserAction,
 };
 use super::command_palette::{
     CommandId, MAX_COMMAND_QUERY_CHARS, first_visible, move_selection, reconcile_selection, resolve,
 };
-use super::model::AppModel;
+use super::model::{AppModel, AppState};
+use crate::pairing::{CODE_DIGITS, PairingCode};
 
 /// Live query and selection for the open command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,11 +41,63 @@ impl DirectAddressInput {
     }
 }
 
+/// Live eight-digit pairing-code entry for the initiator.
+///
+/// The digits are redacted from `Debug` because the entered code is as
+/// sensitive as the code shown on the responder's screen.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PairingCodeInput {
+    pub(crate) digits: String,
+}
+
+impl fmt::Debug for PairingCodeInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PairingCodeInput")
+            .field("digits", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PairingCodeInput {
+    /// Creates an empty input.
+    fn new() -> Self {
+        Self {
+            digits: String::new(),
+        }
+    }
+
+    /// Appends one digit, bounded to the exact code length.
+    fn push(&mut self, character: char) {
+        if self.digits.len() < CODE_DIGITS && character.is_ascii_digit() {
+            self.digits.push(character);
+        }
+    }
+
+    /// Removes the last entered digit.
+    fn pop(&mut self) {
+        self.digits.pop();
+    }
+
+    /// Formats the entered digits grouped as `1234 5678`.
+    pub(crate) fn grouped(&self) -> String {
+        let mut display = String::with_capacity(self.digits.len() + 1);
+        for (index, character) in self.digits.chars().enumerate() {
+            if index == CODE_DIGITS / 2 {
+                display.push(' ');
+            }
+            display.push(character);
+        }
+        display
+    }
+}
+
 /// A full-screen UI surface drawn above the current screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
     CommandPalette(CommandPalette),
     DirectAddress(DirectAddressInput),
+    PairingCode(PairingCodeInput),
     Help,
 }
 
@@ -141,6 +196,24 @@ pub(crate) fn apply_key_input(
             ui.overlay = Some(Overlay::DirectAddress(address));
             None
         }
+        Some(Overlay::PairingCode(mut code_input)) => {
+            match input {
+                KeyInput::Character(character) if character.is_ascii_digit() => {
+                    code_input.push(character);
+                }
+                KeyInput::Backspace => code_input.pop(),
+                KeyInput::Enter => {
+                    if let Some(code) = PairingCode::parse(&code_input.digits) {
+                        return Some(UserAction::SubmitPairingCode(code));
+                    }
+                }
+                // Cancelling code entry closes the provisional connection.
+                KeyInput::Escape => return Some(UserAction::Disconnect),
+                _ => {}
+            }
+            ui.overlay = Some(Overlay::PairingCode(code_input));
+            None
+        }
         Some(Overlay::Help) => match input {
             KeyInput::Escape => None,
             KeyInput::Character('/') => {
@@ -162,6 +235,13 @@ pub(crate) fn apply_key_input(
             }
             KeyInput::Character(character) if character.eq_ignore_ascii_case(&'q') => {
                 Some(UserAction::Quit)
+            }
+            // The in-person pairing prompt is decided with Enter and Escape.
+            KeyInput::Enter if model.state() == AppState::PairingInbound => {
+                Some(UserAction::AcceptPairing)
+            }
+            KeyInput::Escape if model.state() == AppState::PairingInbound => {
+                Some(UserAction::RejectPairing)
             }
             KeyInput::Up | KeyInput::Down if model.capabilities().can_show_devices => {
                 move_device_selection(model, ui, input == KeyInput::Down);
@@ -201,10 +281,20 @@ pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
 ///
 /// The palette selection is kept on the first still-visible command, and a
 /// device selection is cleared when its device disappeared from discovery.
-pub(super) fn reconcile(model: &AppModel, ui: &mut UiState) {
+/// The initiator's code input opens when the request is accepted and closes
+/// as soon as the flow leaves that state.
+pub(crate) fn reconcile(model: &AppModel, ui: &mut UiState) {
     if let Some(Overlay::CommandPalette(palette)) = ui.overlay.as_mut() {
         palette.selected =
             reconcile_selection(model.capabilities(), &palette.query, palette.selected);
+    }
+
+    if model.state() == AppState::PairingOutboundAccepted {
+        if !matches!(ui.overlay, Some(Overlay::PairingCode(_))) {
+            ui.overlay = Some(Overlay::PairingCode(PairingCodeInput::new()));
+        }
+    } else if matches!(ui.overlay, Some(Overlay::PairingCode(_))) {
+        ui.overlay = None;
     }
 
     if let Some(selected) = ui.device_selection {
@@ -513,6 +603,74 @@ mod tests {
         // Escape closes the overlay without dispatching.
         apply_user_action(&mut ui, UserAction::OpenDirectAddress);
         assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Escape), None);
+        assert_eq!(ui.overlay(), None);
+    }
+
+    #[test]
+    fn pairing_prompt_accepts_and_rejects_with_enter_and_escape() {
+        let model = AppModel::for_test(AppState::PairingInbound);
+        let mut ui = UiState::default();
+
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::AcceptPairing)
+        );
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Escape),
+            Some(UserAction::RejectPairing)
+        );
+
+        // The same keys do nothing on other pairing screens.
+        let outbound = AppModel::for_test(AppState::PairingOutbound);
+        assert_eq!(apply_key_input(&outbound, &mut ui, KeyInput::Enter), None);
+        assert_eq!(apply_key_input(&outbound, &mut ui, KeyInput::Escape), None);
+    }
+
+    #[test]
+    fn code_entry_opens_accepts_only_digits_and_dispatches_exactly_eight() {
+        let accepted = AppModel::for_test(AppState::PairingOutboundAccepted);
+        let mut ui = UiState::default();
+        reconcile(&accepted, &mut ui);
+        assert!(matches!(ui.overlay(), Some(Overlay::PairingCode(_))));
+
+        // Text keys are ignored; only digits edit the code.
+        for character in "12ab34 56".chars() {
+            apply_key_input(&accepted, &mut ui, KeyInput::Character(character));
+        }
+        let Some(Overlay::PairingCode(input)) = ui.overlay() else {
+            panic!("the code input should remain open");
+        };
+        assert_eq!(input.grouped(), "1234 56");
+        assert_eq!(apply_key_input(&accepted, &mut ui, KeyInput::Enter), None);
+
+        // The ninth digit is dropped, and Enter dispatches the first eight.
+        apply_key_input(&accepted, &mut ui, KeyInput::Character('7'));
+        apply_key_input(&accepted, &mut ui, KeyInput::Character('8'));
+        apply_key_input(&accepted, &mut ui, KeyInput::Character('9'));
+        let Some(Overlay::PairingCode(input)) = ui.overlay() else {
+            panic!("the code input should remain open");
+        };
+        assert_eq!(input.grouped(), "1234 5678");
+        assert_eq!(
+            apply_key_input(&accepted, &mut ui, KeyInput::Enter),
+            Some(UserAction::SubmitPairingCode(
+                crate::pairing::PairingCode::parse("12345678").unwrap()
+            ))
+        );
+
+        // Backspace edits, and Escape cancels the pairing connection.
+        let mut ui = UiState::default();
+        reconcile(&accepted, &mut ui);
+        apply_key_input(&accepted, &mut ui, KeyInput::Character('1'));
+        apply_key_input(&accepted, &mut ui, KeyInput::Backspace);
+        assert_eq!(
+            apply_key_input(&accepted, &mut ui, KeyInput::Escape),
+            Some(UserAction::Disconnect)
+        );
+
+        // Leaving the code-entry state closes the overlay.
+        let confirming = AppModel::for_test(AppState::PairingConfirming);
+        reconcile(&confirming, &mut ui);
         assert_eq!(ui.overlay(), None);
     }
 }

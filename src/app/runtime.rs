@@ -201,11 +201,13 @@ mod tests {
     async fn runtime_processes_events_and_effects_in_order() {
         let (event_sender, event_receiver) = event_channel();
         let (effect_sender, mut effect_receiver) = effect_channel();
-        let device = DeviceId::new(11);
-
         for event in [
             AppEvent::StartupCompleted,
-            AppEvent::User(UserAction::SelectDevice(device)),
+            AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                "peer",
+                Instant::now(),
+            ))),
+            AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
             AppEvent::PairingSucceeded,
             AppEvent::User(UserAction::StartTransfer),
             AppEvent::ProposalRejected,
@@ -224,7 +226,10 @@ mod tests {
         assert_eq!(
             effect_receiver.recv().await,
             Some(Effect::Connect(
-                crate::app::action::ConnectionTarget::Discovered(device)
+                crate::app::action::ConnectionTarget::Discovered {
+                    address: "127.0.0.1:4242".parse().unwrap(),
+                    display_name: "peer".to_owned(),
+                }
             ))
         );
         assert_eq!(effect_receiver.recv().await, Some(Effect::StartTransfer));
@@ -437,7 +442,10 @@ mod tests {
         assert_eq!(
             effect_receiver.recv().await,
             Some(Effect::Connect(
-                crate::app::action::ConnectionTarget::Discovered(DeviceId::new(2))
+                crate::app::action::ConnectionTarget::Discovered {
+                    address: "127.0.0.1:4242".parse().unwrap(),
+                    display_name: "peer".to_owned(),
+                }
             ))
         );
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));

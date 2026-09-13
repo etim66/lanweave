@@ -12,9 +12,12 @@
 //!
 //! The writer flushes after every frame and shuts the write half down when it
 //! stops. [`Outbound::close`] finishes queued frames before stopping, so the
-//! peer observes one clean EOF. Dropping the `Outbound` without closing aborts
-//! the writer, which can truncate an in-flight frame and surface as a
-//! [`ReadError::Truncated`] on the peer instead of a clean close.
+//! peer observes one clean EOF. [`Outbound::send_control_flushed`] resolves
+//! only after the queued control and every earlier frame were written and
+//! flushed, which the pairing responder needs before it reports authorization.
+//! Dropping the `Outbound` without closing aborts the writer, which can
+//! truncate an in-flight frame and surface as a [`ReadError::Truncated`] on the
+//! peer instead of a clean close.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
@@ -22,7 +25,7 @@ use std::io;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
@@ -147,12 +150,21 @@ where
     (FramedConnection::new(reader), Outbound::spawn(writer))
 }
 
+/// One entry in the ordered control queue.
+///
+/// A barrier is queued behind the frames it must observe, so the single writer
+/// can resolve it only after every earlier frame was written and flushed.
+enum WriterItem {
+    Frame(Frame),
+    Barrier(oneshot::Sender<()>),
+}
+
 /// One bounded, ordered output path.
 ///
 /// A send completes only once the frame is queued; a full queue applies
 /// backpressure instead of growing memory.
 pub(crate) struct Outbound {
-    controls: mpsc::Sender<Frame>,
+    controls: mpsc::Sender<WriterItem>,
     data: mpsc::Sender<Frame>,
     stop: watch::Sender<bool>,
     writer: Option<JoinHandle<()>>,
@@ -183,15 +195,29 @@ impl Outbound {
 
     /// Queues one control message behind the currently ordered frames.
     pub(crate) async fn send_control(&self, control: &Control) -> Result<(), SendError> {
-        let body = control.encode();
-        if body.len() > MAX_CONTROL_BODY_BYTES {
-            return Err(SendError::InvalidData);
-        }
-        let frame = Frame::control(Bytes::from(body));
+        let frame = encode_control(control)?;
         self.controls
-            .send(frame)
+            .send(WriterItem::Frame(frame))
             .await
             .map_err(|_| SendError::Closed)
+    }
+
+    /// Queues one control message and waits until it is written and flushed.
+    ///
+    /// The wait also covers every frame queued before it, which is what the
+    /// pairing responder needs before it treats the session as authorized.
+    pub(crate) async fn send_control_flushed(&self, control: &Control) -> Result<(), SendError> {
+        let frame = encode_control(control)?;
+        let (acknowledge, acknowledged) = oneshot::channel();
+        self.controls
+            .send(WriterItem::Frame(frame))
+            .await
+            .map_err(|_| SendError::Closed)?;
+        self.controls
+            .send(WriterItem::Barrier(acknowledge))
+            .await
+            .map_err(|_| SendError::Closed)?;
+        acknowledged.await.map_err(|_| SendError::Closed)
     }
 
     /// Queues one bounded DATA frame.
@@ -242,7 +268,7 @@ impl Drop for Outbound {
 /// The single serialized output path, preferring queued DATA to controls.
 async fn writer_loop<W>(
     mut writer: W,
-    mut controls: mpsc::Receiver<Frame>,
+    mut controls: mpsc::Receiver<WriterItem>,
     mut data: mpsc::Receiver<Frame>,
     mut stop: watch::Receiver<bool>,
 ) where
@@ -255,9 +281,18 @@ async fn writer_loop<W>(
                 let Some(frame) = frame else { break };
                 if write_frame(&mut writer, &frame).await.is_err() { break; }
             }
-            frame = controls.recv() => {
-                let Some(frame) = frame else { break };
-                if write_frame(&mut writer, &frame).await.is_err() { break; }
+            item = controls.recv() => {
+                match item {
+                    None => break,
+                    Some(WriterItem::Frame(frame)) => {
+                        if write_frame(&mut writer, &frame).await.is_err() { break; }
+                    }
+                    // Every earlier control frame was written and flushed, so
+                    // the waiting sender may stop treating it as in flight.
+                    Some(WriterItem::Barrier(acknowledge)) => {
+                        let _ = acknowledge.send(());
+                    }
+                }
             }
             stopped = stop.changed() => {
                 if stopped.is_err() || *stop.borrow() { break; }
@@ -265,6 +300,15 @@ async fn writer_loop<W>(
         }
     }
     let _ = timeout(FRAME_WRITE_DEADLINE, writer.shutdown()).await;
+}
+
+/// Encodes one bounded control message into a frame.
+fn encode_control(control: &Control) -> Result<Frame, SendError> {
+    let body = control.encode();
+    if body.len() > MAX_CONTROL_BODY_BYTES {
+        return Err(SendError::InvalidData);
+    }
+    Ok(Frame::control(Bytes::from(body)))
 }
 
 /// Encodes and writes one complete frame, flushing the underlying stream.
@@ -392,6 +436,25 @@ mod tests {
         }
         assert_eq!(data_seen, data_count);
         assert!(last_was_control, "file_end was not delivered");
+    }
+
+    #[tokio::test]
+    async fn flushed_control_resolves_only_after_the_frame_is_written() {
+        let (peer, local) = duplex(8192);
+        let (_local_connection, outbound) = split_frame_io(local);
+        let (mut peer_connection, _peer_outbound) = split_frame_io(peer);
+
+        // The barrier resolves only once the writer flushed the frame, so the
+        // peer is guaranteed to observe it before the sender proceeds.
+        outbound
+            .send_control_flushed(&Control::Ready)
+            .await
+            .unwrap();
+        let frame = peer_connection.read_frame().await.unwrap().unwrap();
+        assert_eq!(
+            frame.into_body(),
+            Bytes::from_static(br#"{"type":"ready"}"#)
+        );
     }
 
     #[tokio::test]

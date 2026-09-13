@@ -1,16 +1,27 @@
 //! Plain application state and messages shared by the event loop and adapters.
 
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
+
+use super::action::{ConnectionTarget, DeviceId, PairingPeer};
 use super::failure::FailureKind;
 use crate::discovery::{Candidate, CandidateStore, DiscoveryEvent};
+use crate::pairing::PairingCode;
 
 /// The authoritative top-level application state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Starting,
     Browsing,
+    /// A connection is being established or a `pair_request` awaits response.
     PairingOutbound,
+    /// The request was accepted; the initiator enters the displayed code.
+    PairingOutboundAccepted,
+    /// An inbound request awaits the local accept or reject decision.
     PairingInbound,
+    /// The local user accepted; the responder displays the one-time code.
     PairingInboundAccepted,
+    /// The code was submitted and the mutual confirmation is in progress.
+    PairingConfirming,
     ClosingPairing,
     SessionIdle,
     OutboundProposal,
@@ -26,12 +37,14 @@ pub enum AppState {
 impl AppState {
     /// Every state, for exhaustive test coverage.
     #[cfg(test)]
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::Starting,
         Self::Browsing,
         Self::PairingOutbound,
+        Self::PairingOutboundAccepted,
         Self::PairingInbound,
         Self::PairingInboundAccepted,
+        Self::PairingConfirming,
         Self::ClosingPairing,
         Self::SessionIdle,
         Self::OutboundProposal,
@@ -49,8 +62,10 @@ impl AppState {
         matches!(
             self,
             Self::PairingOutbound
+                | Self::PairingOutboundAccepted
                 | Self::PairingInbound
                 | Self::PairingInboundAccepted
+                | Self::PairingConfirming
                 | Self::ClosingPairing
         )
     }
@@ -115,8 +130,10 @@ impl From<AppState> for Screen {
             AppState::Starting => Self::Starting,
             AppState::Browsing => Self::Browsing,
             AppState::PairingOutbound
+            | AppState::PairingOutboundAccepted
             | AppState::PairingInbound
             | AppState::PairingInboundAccepted
+            | AppState::PairingConfirming
             | AppState::ClosingPairing => Self::Pairing,
             AppState::SessionIdle | AppState::ClosingSession => Self::Session,
             AppState::OutboundProposal
@@ -135,6 +152,8 @@ impl From<AppState> for Screen {
 pub struct AppModel {
     state: AppState,
     candidates: CandidateStore,
+    pairing_peer: Option<PairingPeer>,
+    pairing_code: Option<PairingCode>,
 }
 
 impl AppModel {
@@ -143,12 +162,24 @@ impl AppModel {
         Self {
             state: AppState::Starting,
             candidates: CandidateStore::new(),
+            pairing_peer: None,
+            pairing_code: None,
         }
     }
 
     /// Returns the current application state.
     pub const fn state(&self) -> AppState {
         self.state
+    }
+
+    /// Returns the peer shown on a pairing prompt or code screen.
+    pub(crate) fn pairing_peer(&self) -> Option<&PairingPeer> {
+        self.pairing_peer.as_ref()
+    }
+
+    /// Returns the responder's one-time code while it is displayed.
+    pub(crate) fn pairing_code(&self) -> Option<&PairingCode> {
+        self.pairing_code.as_ref()
     }
 
     /// Returns the screen the current state should render.
@@ -191,13 +222,57 @@ impl AppModel {
         self.candidates.apply(event);
     }
 
+    /// Stores the untrusted peer shown during pairing.
+    pub(super) fn set_pairing_peer(&mut self, peer: PairingPeer) {
+        self.pairing_peer = Some(peer);
+    }
+
+    /// Stores the responder's displayed one-time code.
+    pub(super) fn set_pairing_code(&mut self, code: PairingCode) {
+        self.pairing_code = Some(code);
+    }
+
+    /// Drops the peer and code as soon as pairing or the session ends.
+    pub(super) fn clear_pairing(&mut self) {
+        self.pairing_peer = None;
+        self.pairing_code = None;
+    }
+
+    /// Resolves a discovered device to one route with display context.
+    ///
+    /// Addresses are already sorted by the candidate store, so the first one
+    /// is the deterministic choice. Returning `None` means the device is gone
+    /// and the selection must not start a connection.
+    pub(super) fn discovered_target(&self, device: DeviceId) -> Option<ConnectionTarget> {
+        let candidate = self.candidates.candidate(device)?;
+        let address = candidate.addresses().first()?;
+        Some(ConnectionTarget::Discovered {
+            address: socket_address(
+                address.address(),
+                address.interface_index(),
+                candidate.port(),
+            ),
+            display_name: candidate.display_name().to_owned(),
+        })
+    }
+
     /// Builds a model in `state` for tests.
     #[cfg(test)]
     pub(crate) fn for_test(state: AppState) -> Self {
         Self {
             state,
             candidates: CandidateStore::new(),
+            pairing_peer: None,
+            pairing_code: None,
         }
+    }
+}
+
+/// Builds a routable socket address, keeping IPv6 interface scope.
+fn socket_address(ip: IpAddr, scope: u32, port: u16) -> SocketAddr {
+    match ip {
+        IpAddr::V4(v4) => SocketAddr::new(IpAddr::V4(v4), port),
+        IpAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(v6, port, 0, scope)),
     }
 }
 
@@ -227,8 +302,10 @@ mod tests {
             (AppState::Starting, Screen::Starting),
             (AppState::Browsing, Screen::Browsing),
             (AppState::PairingOutbound, Screen::Pairing),
+            (AppState::PairingOutboundAccepted, Screen::Pairing),
             (AppState::PairingInbound, Screen::Pairing),
             (AppState::PairingInboundAccepted, Screen::Pairing),
+            (AppState::PairingConfirming, Screen::Pairing),
             (AppState::ClosingPairing, Screen::Pairing),
             (AppState::SessionIdle, Screen::Session),
             (AppState::OutboundProposal, Screen::Transfer),

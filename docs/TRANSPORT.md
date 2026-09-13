@@ -32,7 +32,8 @@ The implementation uses the `ring` crypto provider with SSL-over-1.3-only config
 - `rcgen` 0.14 for the fresh P-256 certificate per connection; and
 - `zeroize` for best-effort cleanup of the exporter.
 
-Release builds must disable key logging. The pairing dependency is still a research gate; see [Cryptography](CRYPTOGRAPHY.md).
+Release builds must disable key logging. The pairing dependency is a prototype around `pakery-spake2` and
+`pakery-crypto` pending independent review; see [Cryptography](CRYPTOGRAPHY.md).
 
 ## Stream And Framing
 
