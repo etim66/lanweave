@@ -22,7 +22,7 @@ pub(crate) use framed::{
     ReadError, SendError, split_frame_io,
 };
 #[allow(unused_imports)]
-pub(crate) use tls::{ALPN_PROTOCOL, EXPORTER_LEN, TlsHandshake, accept, connect};
+pub(crate) use tls::{ALPN_PROTOCOL, EXPORTER_LEN, TlsHandshake, accept, accept_stream, connect};
 
 #[cfg(test)]
 mod tests {

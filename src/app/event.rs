@@ -1,8 +1,9 @@
 //! Runtime inputs and application-requested work.
 
-use super::action::{ConnectionTarget, KeyInput, UserAction};
+use super::action::{ConnectionTarget, KeyInput, PairingPeer, UserAction};
 use super::failure::FailureKind;
 use crate::discovery::DiscoveryEvent;
+use crate::pairing::PairingCode;
 
 /// Inputs consumed by the application runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,11 +11,19 @@ use crate::discovery::DiscoveryEvent;
 pub(crate) enum AppEvent {
     StartupCompleted,
     Tick,
-    TerminalResized { width: u16, height: u16 },
+    TerminalResized {
+        width: u16,
+        height: u16,
+    },
     Discovery(DiscoveryEvent),
     KeyInput(KeyInput),
     User(UserAction),
-    IncomingPairingRequest,
+    /// An inbound `pair_request` is waiting for the local user's decision.
+    IncomingPairingRequest(PairingPeer),
+    /// The peer accepted our `pair_request`; the initiator may enter the code.
+    PairingAccepted,
+    /// The responder created and displays a one-time code.
+    PairingCodeIssued(PairingCode),
     PairingSucceeded,
     PairingEnded,
     IncomingTransferRequest,
@@ -33,6 +42,7 @@ pub(crate) enum Effect {
     AcceptPairing,
     RejectPairing,
     RejectPairingBusy,
+    SubmitPairingCode(PairingCode),
     StartTransfer,
     AcceptTransfer,
     RejectTransfer,

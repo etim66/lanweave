@@ -1,5 +1,6 @@
 use ratatui::style::Color;
 
+use crate::app::action::PairingPeer;
 use crate::app::failure::FailureKind;
 use crate::app::model::{AppModel, AppState, Screen};
 
@@ -11,8 +12,10 @@ pub(super) fn status_text(state: AppState) -> &'static str {
         AppState::Starting => "Starting",
         AppState::Browsing => "Browsing for devices",
         AppState::PairingOutbound
+        | AppState::PairingOutboundAccepted
         | AppState::PairingInbound
         | AppState::PairingInboundAccepted
+        | AppState::PairingConfirming
         | AppState::ClosingPairing => "Pairing",
         AppState::SessionIdle | AppState::ClosingSession => "Session active",
         AppState::OutboundProposal
@@ -58,14 +61,11 @@ pub(super) fn screen_content(model: &AppModel) -> (String, String, Color) {
             "Shutting down safely...".to_owned(),
             WARNING,
         ),
-        Screen::Pairing => (
-            "Pairing".to_owned(),
-            "Pairing controls are not available in this build.".to_owned(),
-            ACCENT,
-        ),
+        Screen::Pairing => pairing_content(model),
         Screen::Session => (
-            "Session active".to_owned(),
-            "Session controls are not available in this build.".to_owned(),
+            "Authorized session".to_owned(),
+            "The code was confirmed on the live connection. File transfer is not available in this build."
+                .to_owned(),
             ACCENT,
         ),
         Screen::Transfer => (
@@ -73,6 +73,75 @@ pub(super) fn screen_content(model: &AppModel) -> (String, String, Color) {
             "Transfer controls are not available in this build.".to_owned(),
             ACCENT,
         ),
+    }
+}
+
+/// Returns the pairing title and message for the current pairing substate.
+///
+/// Peer names come from untrusted `hello` text; the wording keeps that limit
+/// visible on every prompt until confirmation succeeds.
+fn pairing_content(model: &AppModel) -> (String, String, Color) {
+    let peer = model
+        .pairing_peer()
+        .map(describe_peer)
+        .unwrap_or_else(|| "the other device".to_owned());
+
+    match model.state() {
+        AppState::PairingOutbound => (
+            "Waiting for response".to_owned(),
+            format!(
+                "Pairing request sent to {peer}. The name is untrusted until pairing confirms the device."
+            ),
+            ACCENT,
+        ),
+        AppState::PairingOutboundAccepted => (
+            "Enter the pairing code".to_owned(),
+            "Type the eight-digit code shown on the other device, then press enter.".to_owned(),
+            ACCENT,
+        ),
+        AppState::PairingConfirming => (
+            "Checking the code".to_owned(),
+            "Confirming the pairing over the encrypted connection...".to_owned(),
+            ACCENT,
+        ),
+        AppState::PairingInbound => (
+            "Pairing request".to_owned(),
+            format!(
+                "{peer} wants to pair. The name and address are untrusted; accept only if the person is present."
+            ),
+            ACCENT,
+        ),
+        AppState::PairingInboundAccepted => {
+            let code = model
+                .pairing_code()
+                .map(|code| code.grouped())
+                .unwrap_or_else(|| "........".to_owned());
+            (
+                "Pairing code".to_owned(),
+                format!(
+                    "Tell the other device: {code}\nThe code expires after about two minutes and is never sent over the connection."
+                ),
+                ACCENT,
+            )
+        }
+        AppState::ClosingPairing => (
+            "Closing pairing".to_owned(),
+            "Closing the provisional connection...".to_owned(),
+            WARNING,
+        ),
+        _ => (
+            "Pairing".to_owned(),
+            "Pairing is in progress.".to_owned(),
+            ACCENT,
+        ),
+    }
+}
+
+/// Describes a peer for a pairing prompt without presenting it as verified.
+fn describe_peer(peer: &PairingPeer) -> String {
+    match peer.display_name() {
+        Some(name) => format!("{name} ({})", peer.endpoint()),
+        None => peer.endpoint().to_owned(),
     }
 }
 

@@ -1,8 +1,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use tokio::net::{TcpListener, TcpSocket};
-use tokio::sync::watch;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::app::event::AppEvent;
@@ -14,8 +14,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Owns the TCP listener advertised through mDNS.
 ///
-/// Until the framed transport is implemented, accepted sockets are closed
-/// without entering the application event loop.
+/// Accepted sockets are forwarded to the session owner through a bounded
+/// channel. When the receiver is gone the socket is dropped, and when the
+/// channel is full the accept loop waits, so connection floods apply
+/// backpressure instead of growing unbounded work.
 pub(crate) struct LocalListener {
     address: SocketAddr,
     listener: Option<TcpListener>,
@@ -47,10 +49,15 @@ impl LocalListener {
         self.address.port()
     }
 
-    /// Starts accepting connections, reporting failures through `events`.
+    /// Starts accepting connections, reporting failures through `events` and
+    /// forwarding accepted sockets through `accepted`.
     ///
     /// Fails when the listener is already running or its socket is gone.
-    pub(crate) fn start(&mut self, events: EventSender) -> anyhow::Result<()> {
+    pub(crate) fn start(
+        &mut self,
+        events: EventSender,
+        accepted: mpsc::Sender<TcpStream>,
+    ) -> anyhow::Result<()> {
         if self.task.is_some() {
             anyhow::bail!("local listener is already running");
         }
@@ -67,12 +74,15 @@ impl LocalListener {
                             return;
                         }
                     }
-                    accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else {
+                    incoming = listener.accept() => {
+                        let Ok((stream, _)) = incoming else {
                             let _ = events.send(AppEvent::Failed(FailureKind::Connection)).await;
                             return;
                         };
-                        drop(stream);
+                        // A full channel applies backpressure; a closed one
+                        // means the session owner is gone, so drop the socket
+                        // and keep the accept loop available.
+                        let _ = accepted.send(stream).await;
                     }
                 }
             }
@@ -129,34 +139,42 @@ fn bind_ipv4() -> anyhow::Result<TcpListener> {
 #[cfg(test)]
 mod tests {
     use tokio::net::TcpStream;
+    use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::LocalListener;
     use crate::app::runtime::{APP_EVENT_CHANNEL_CAPACITY, event_channel};
 
     #[tokio::test]
-    async fn listener_closes_connections_without_per_connection_events() {
+    async fn listener_forwards_connections_without_per_connection_events() {
         let (events, mut receiver) = event_channel();
+        let (accepted, mut accepted_receiver) = mpsc::channel(APP_EVENT_CHANNEL_CAPACITY);
         let mut listener = LocalListener::bind().unwrap();
         assert_ne!(listener.port(), 0);
         let address = listener.loopback_address();
-        listener.start(events).unwrap();
+        listener.start(events, accepted).unwrap();
 
-        for _ in 0..APP_EVENT_CHANNEL_CAPACITY + 8 {
-            let stream = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                TcpStream::connect(address),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(1), stream.readable())
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            TcpStream::connect(address),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let forwarded =
+            tokio::time::timeout(std::time::Duration::from_secs(1), accepted_receiver.recv())
                 .await
                 .unwrap()
-                .unwrap();
-            let mut byte = [0];
-            assert_eq!(stream.try_read(&mut byte).unwrap(), 0);
-        }
+                .expect("accepted socket must reach the session owner");
+        assert_eq!(
+            forwarded.peer_addr().unwrap().ip(),
+            address.ip(),
+            "the forwarded socket belongs to the accepted connection"
+        );
+        drop(forwarded);
+        drop(stream);
+
+        // Ordinary accepts never enter the application event channel.
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
 
         listener.stop().await.unwrap();

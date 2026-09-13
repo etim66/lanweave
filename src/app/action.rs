@@ -1,5 +1,10 @@
 //! User intent and terminal-independent interaction inputs.
 
+use std::net::SocketAddr;
+
+use crate::discovery::escape_display;
+use crate::pairing::PairingCode;
+
 /// Maximum length of a host portion in a [`DirectEndpoint`].
 pub(crate) const MAX_DIRECT_HOST_BYTES: usize = 255;
 /// Maximum number of characters in a direct-address input line.
@@ -115,8 +120,59 @@ impl DirectEndpoint {
 /// A route selected from discovery or entered directly by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConnectionTarget {
-    Discovered(DeviceId),
+    /// A discovery candidate resolved to one reachable socket address.
+    Discovered {
+        address: SocketAddr,
+        display_name: String,
+    },
+    /// A user-entered host and port that still needs name resolution.
     Direct(DirectEndpoint),
+}
+
+impl ConnectionTarget {
+    /// Describes the peer for the pairing screen without trusting its name.
+    pub(crate) fn pairing_peer(&self) -> PairingPeer {
+        match self {
+            Self::Discovered {
+                address,
+                display_name,
+            } => PairingPeer::new(Some(display_name.clone()), address.to_string()),
+            Self::Direct(endpoint) => {
+                PairingPeer::new(None, format!("{}:{}", endpoint.host(), endpoint.port()))
+            }
+        }
+    }
+}
+
+/// Untrusted peer information shown in a pairing prompt or code screen.
+///
+/// The display name comes from a peer-controlled `hello` field, so it is
+/// escaped for terminal safety at construction. The name still does not prove
+/// identity; only pairing confirmation does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairingPeer {
+    display_name: Option<String>,
+    endpoint: String,
+}
+
+impl PairingPeer {
+    /// Builds display-safe peer information.
+    pub(crate) fn new(display_name: Option<String>, endpoint: String) -> Self {
+        Self {
+            display_name: display_name.map(|name| escape_display(&name)),
+            endpoint,
+        }
+    }
+
+    /// Returns the escaped, untrusted display name when the peer sent one.
+    pub(crate) fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// Returns the address or `host:port` string used for local context.
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
 }
 
 /// User intent produced by the TUI or command registry.
@@ -130,6 +186,7 @@ pub(crate) enum UserAction {
     OpenDirectAddress,
     AcceptPairing,
     RejectPairing,
+    SubmitPairingCode(PairingCode),
     StartTransfer,
     AcceptTransfer,
     RejectTransfer,

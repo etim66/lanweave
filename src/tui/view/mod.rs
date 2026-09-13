@@ -3,6 +3,7 @@ mod direct_address;
 mod help;
 mod home;
 mod layout;
+mod pairing_code;
 mod palette;
 mod presenter;
 mod theme;
@@ -48,6 +49,9 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         Some(Overlay::DirectAddress(input)) => {
             direct_address::render(frame, content, model, input);
         }
+        Some(Overlay::PairingCode(input)) => {
+            pairing_code::render(frame, content, model, input);
+        }
         Some(Overlay::Help) => help::render(frame, content, model),
         None => home::render(frame, content, model, ui),
     }
@@ -80,13 +84,14 @@ mod tests {
 
     use super::render;
     use super::theme::{BACKGROUND, HIGHLIGHT, SURFACE};
-    use crate::app::action::{DeviceId, KeyInput, UserAction};
+    use crate::app::action::{DeviceId, KeyInput, PairingPeer, UserAction};
     use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
-    use crate::app::interaction::{UiState, apply_key_input, apply_user_action};
+    use crate::app::interaction::{UiState, apply_key_input, apply_user_action, reconcile};
     use crate::app::model::AppModel;
     use crate::app::reducer::update;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
+    use crate::pairing::PairingCode;
 
     #[test]
     fn basic_screens_render_at_normal_and_small_sizes() {
@@ -175,6 +180,13 @@ mod tests {
         update(&mut session, AppEvent::StartupCompleted);
         update(
             &mut session,
+            AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                "peer",
+                Instant::now(),
+            ))),
+        );
+        update(
+            &mut session,
             AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
         );
         update(&mut session, AppEvent::PairingSucceeded);
@@ -196,6 +208,57 @@ mod tests {
         apply_key_input(&model, &mut ui, KeyInput::Character('/'));
         assert!(!render_with_ui(&model, &ui, 24, 8).is_empty());
         assert!(!render_with_ui(&model, &ui, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn pairing_prompt_code_display_and_entry_render() {
+        // A hostile display name stays escaped in the prompt.
+        let mut prompt = AppModel::new();
+        update(&mut prompt, AppEvent::StartupCompleted);
+        update(
+            &mut prompt,
+            AppEvent::IncomingPairingRequest(PairingPeer::new(
+                Some("peer\nname".to_owned()),
+                "192.0.2.10:4242".to_owned(),
+            )),
+        );
+        let output = render_to_string(&prompt, 80, 24);
+        assert!(output.contains("Pairing request"));
+        assert!(output.contains("untrusted"));
+        assert!(output.contains("peer\\u{000A}name"));
+        assert!(output.contains("192.0.2.10:4242"));
+
+        // The responder displays the code grouped and never as a wire value.
+        let mut display = prompt.clone();
+        update(&mut display, AppEvent::User(UserAction::AcceptPairing));
+        update(
+            &mut display,
+            AppEvent::PairingCodeIssued(PairingCode::parse("01234567").unwrap()),
+        );
+        let output = render_to_string(&display, 80, 24);
+        assert!(output.contains("Pairing code"));
+        assert!(output.contains("0123 4567"));
+
+        // The initiator's code entry opens with the accepted response.
+        let mut entry = browsing_with(&["peer"]);
+        let mut ui = UiState::default();
+        apply_key_input(&entry, &mut ui, KeyInput::Down);
+        assert_eq!(
+            apply_key_input(&entry, &mut ui, KeyInput::Enter),
+            Some(UserAction::SelectDevice(DeviceId::new(1)))
+        );
+        update(
+            &mut entry,
+            AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
+        );
+        update(&mut entry, AppEvent::PairingAccepted);
+        reconcile(&entry, &mut ui);
+        for character in "1234".chars() {
+            apply_key_input(&entry, &mut ui, KeyInput::Character(character));
+        }
+        let output = render_with_ui(&entry, &ui, 80, 24);
+        assert!(output.contains("Enter the pairing code"));
+        assert!(output.contains("1234"));
     }
 
     fn browsing_with(names: &[&str]) -> AppModel {

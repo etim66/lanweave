@@ -77,12 +77,26 @@ pub(crate) async fn accept(
     listener: &TcpListener,
     deadline: Duration,
 ) -> anyhow::Result<TlsHandshake> {
+    let (tcp, _) = tokio::time::timeout(deadline, listener.accept())
+        .await
+        .map_err(|_| anyhow::anyhow!("TLS connection timed out"))??;
+    accept_stream(tcp, deadline).await
+}
+
+/// Completes the provisional TLS 1.3 profile on an already-accepted socket.
+///
+/// The session owner accepts sockets through the discovery listener and then
+/// hands each one here, so the TLS handshake shares the responder profile
+/// without re-accepting from the listener.
+pub(crate) async fn accept_stream(
+    stream: TcpStream,
+    deadline: Duration,
+) -> anyhow::Result<TlsHandshake> {
     // A fresh certificate and server config is created per connection.
     let responder_config = responder_config()?;
     let handshake = async {
-        let (tcp, _) = listener.accept().await?;
         let acceptor = tokio_rustls::TlsAcceptor::from(responder_config.clone());
-        acceptor.accept(tcp).await.map(TlsStream::from)
+        acceptor.accept(stream).await.map(TlsStream::from)
     };
     let stream = tokio::time::timeout(deadline, handshake)
         .await

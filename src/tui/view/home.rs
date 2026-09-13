@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::app::interaction::UiState;
-use crate::app::model::{AppModel, Screen};
+use crate::app::model::{AppModel, AppState, Screen};
 
 use super::layout::{centered_rect, inset_surface, surface_width};
 use super::presenter::screen_content;
@@ -62,7 +62,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
 
     let hints_y = panel_y.saturating_add(panel_height).saturating_add(1);
     if hints_y < stack_bottom {
-        render_hints(frame, Rect::new(stack.x, hints_y, stack.width, 1), browsing);
+        render_hints(frame, Rect::new(stack.x, hints_y, stack.width, 1), model);
     }
 
     let tip_y = hints_y.saturating_add(2);
@@ -240,9 +240,9 @@ fn render_panel_line(frame: &mut Frame<'_>, area: Rect, line: Line<'_>) {
 }
 
 /// Renders the one-line keyboard hints below the state surface.
-fn render_hints(frame: &mut Frame<'_>, area: Rect, browsing: bool) {
-    let spans = if browsing {
-        vec![
+fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let spans = match model.state() {
+        AppState::Browsing => vec![
             Span::styled("up/down", Style::new().fg(TEXT)),
             Span::styled(" select   ", Style::new().fg(MUTED)),
             Span::styled("enter", Style::new().fg(TEXT)),
@@ -251,16 +251,33 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, browsing: bool) {
             Span::styled(" commands   ", Style::new().fg(MUTED)),
             Span::styled("q", Style::new().fg(TEXT)),
             Span::styled(" quit", Style::new().fg(MUTED)),
-        ]
-    } else {
-        vec![
+        ],
+        AppState::PairingInbound => vec![
+            Span::styled("enter", Style::new().fg(TEXT)),
+            Span::styled(" accept   ", Style::new().fg(MUTED)),
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" reject   ", Style::new().fg(MUTED)),
+            Span::styled("/", Style::new().fg(TEXT)),
+            Span::styled(" commands   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
+        ],
+        AppState::PairingOutboundAccepted => vec![
+            Span::styled("0-9", Style::new().fg(TEXT)),
+            Span::styled(" type   ", Style::new().fg(MUTED)),
+            Span::styled("enter", Style::new().fg(TEXT)),
+            Span::styled(" submit   ", Style::new().fg(MUTED)),
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" cancel", Style::new().fg(MUTED)),
+        ],
+        _ => vec![
             Span::styled("/", Style::new().fg(TEXT)),
             Span::styled(" commands   ", Style::new().fg(MUTED)),
             Span::styled("q", Style::new().fg(TEXT)),
             Span::styled(" quit   ", Style::new().fg(MUTED)),
             Span::styled("ctrl+c", Style::new().fg(TEXT)),
             Span::styled(" quit", Style::new().fg(MUTED)),
-        ]
+        ],
     };
     frame.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Left),

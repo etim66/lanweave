@@ -36,9 +36,13 @@ app -/-> TUI or concrete adapters
 `bootstrap` is the composition root. It creates the terminal, bounded channels,
 tasks, and shutdown supervision. `app/model.rs` contains domain-facing state;
 `app/interaction.rs` owns temporary UI state; and `tui/view/` contains focused
-rendering components. Discovery browsing, mDNS advertisement, and the temporary
-TCP listener are owned by the service effect dispatcher; later transport and
-session adapters remain placeholders.
+rendering components. Discovery browsing, mDNS advertisement, and the TCP
+listener are owned by the service effect dispatcher. The session owner
+(`session/`) connects accepted sockets and outbound connections to the framed
+TLS transport and the protocol state machine: it performs the pairing
+request/response exchange, the memory-only one-time code, the four SPAKE2
+records, and the authorized idle session, and it reports every outcome as an
+application event. Transfer and storage adapters remain placeholders.
 
 | Area | Owns | Must not own |
 | --- | --- | --- |

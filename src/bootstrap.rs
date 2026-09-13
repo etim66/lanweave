@@ -7,6 +7,7 @@ use crate::discovery::{
     DiscoveryReceiver, DiscoveryService, LocalListener, MdnsDiscoveryService,
     event_channel as discovery_channel,
 };
+use crate::session::{SessionCommand, SessionService, accepted_channel};
 
 /// Runs Lanweave until shutdown completes.
 ///
@@ -25,13 +26,18 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let mut listener = LocalListener::bind()
         .map_err(|error| anyhow::anyhow!("failed to bind the local TCP listener: {error}"))?;
-    listener.start(event_sender.clone())?;
+    let (accepted_sender, accepted_receiver) = accepted_channel();
+    listener.start(event_sender.clone(), accepted_sender)?;
 
     let mut discovery = MdnsDiscoveryService::new();
     if let Err(error) = discovery.start(discovery_sender, listener.port()) {
         let _ = listener.stop().await;
         return Err(error);
     }
+
+    // The session owner receives accepted sockets from the listener and the
+    // pairing commands produced by the application effects.
+    let session = SessionService::start(event_sender.clone(), accepted_receiver);
 
     // --- Startup signal -----------------------------------------------------
     // Announce that bootstrap is complete, then split the sender among the
@@ -50,7 +56,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let input = tokio::spawn(crate::tui::run_events(input_sender, stop_receiver));
     let discovery_events =
         tokio::spawn(relay_discovery(discovery_receiver, discovery_event_sender));
-    let effects = tokio::spawn(dispatch_effects(effect_receiver, discovery, listener));
+    let effects = tokio::spawn(dispatch_effects(
+        effect_receiver,
+        session,
+        discovery,
+        listener,
+    ));
 
     // --- Event loop ---------------------------------------------------------
     // The runtime is the main process: it consumes events, reduces the model,
@@ -100,30 +111,48 @@ async fn relay_discovery(
 
 /// Executes the side effects requested by the application reducer.
 ///
-/// A shutdown effect stops the network services and reports that shutdown was
-/// handled. If the channel closes first, the services are stopped anyway and
-/// `Ok(false)` is returned. All other effects are currently no-ops.
+/// A shutdown effect stops the session owner and the network services, then
+/// reports that shutdown was handled. If the channel closes first, everything
+/// is stopped anyway and `Ok(false)` is returned. Transfer effects stay
+/// no-ops until the transfer feature lands.
 async fn dispatch_effects(
     mut effects: EffectReceiver,
+    session: SessionService,
     mut discovery: MdnsDiscoveryService,
     mut listener: LocalListener,
 ) -> anyhow::Result<bool> {
     while let Some(effect) = effects.recv().await {
         match effect {
             Effect::Shutdown => {
+                session.stop().await;
                 stop_network_services(&mut discovery, &mut listener).await?;
                 return Ok(true);
             }
-            Effect::Connect(_)
-            | Effect::AcceptPairing
-            | Effect::RejectPairing
-            | Effect::RejectPairingBusy
-            | Effect::StartTransfer
-            | Effect::AcceptTransfer
-            | Effect::RejectTransfer
-            | Effect::Disconnect => {}
+            Effect::Connect(target) => {
+                session.send(SessionCommand::Connect(target)).await?;
+            }
+            Effect::AcceptPairing => {
+                session.send(SessionCommand::AcceptPairing).await?;
+            }
+            Effect::RejectPairing => {
+                session.send(SessionCommand::RejectPairing).await?;
+            }
+            Effect::RejectPairingBusy => {
+                session.send(SessionCommand::RejectPairingBusy).await?;
+            }
+            Effect::SubmitPairingCode(code) => {
+                session
+                    .send(SessionCommand::SubmitPairingCode(code))
+                    .await?;
+            }
+            Effect::Disconnect => {
+                session.send(SessionCommand::Disconnect).await?;
+            }
+            Effect::StartTransfer | Effect::AcceptTransfer | Effect::RejectTransfer => {}
         }
     }
+
+    session.stop().await;
     stop_network_services(&mut discovery, &mut listener).await?;
     Ok(false)
 }
