@@ -67,6 +67,8 @@ Exit criteria:
 - Unsafe or existing names never overwrite a destination.
 - A later-file failure keeps the verified prefix and removes the current partial.
 
+Status: the local half is implemented. `transfer::selection` parses, validates, and reduces pasted paths to a names-and-sizes manifest; `storage` validates destination names and manages restrictive no-replace partial files; and `transfer::engine` streams bounded chunks with SHA-256 verification and fail-fast prefix retention. The session owner connects the engine to `transfer_request` and `DATA` frames in the next gate.
+
 ## Gate 6: Reusable Sessions
 
 Allow either participant to propose later transfers, serialize transfer state, resolve simultaneous requests, and close sessions.

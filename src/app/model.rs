@@ -101,6 +101,8 @@ impl AppState {
 pub(crate) struct AppCapabilities {
     pub(crate) accepts_commands: bool,
     pub(crate) can_show_devices: bool,
+    /// The file review list can be opened and kept on screen.
+    pub(crate) can_review_files: bool,
     pub(crate) can_start_transfer: bool,
     pub(crate) transfer_unavailable: bool,
     pub(crate) session_closing: bool,
@@ -204,6 +206,7 @@ impl AppModel {
         AppCapabilities {
             accepts_commands: state != AppState::ShuttingDown,
             can_show_devices: state == AppState::Browsing,
+            can_review_files: matches!(state, AppState::Browsing | AppState::SessionIdle),
             can_start_transfer: state == AppState::SessionIdle,
             transfer_unavailable: state.has_session() && state != AppState::SessionIdle,
             session_closing: state == AppState::ClosingSession,

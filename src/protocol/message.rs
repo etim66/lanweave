@@ -634,17 +634,25 @@ fn decode_sha256(encoded: &str) -> Result<[u8; 32], MessageError> {
 
 /// Rejects names that are not single bounded filename components.
 fn validate_filename(name: &str) -> Result<(), MessageError> {
-    if name.is_empty()
-        || name.len() > MAX_NAME_BYTES
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-        || name.chars().any(char::is_control)
-    {
-        return Err(MessageError::InvalidValue { field: "name" });
+    if is_valid_filename(name) {
+        Ok(())
+    } else {
+        Err(MessageError::InvalidValue { field: "name" })
     }
-    Ok(())
+}
+
+/// Returns whether `name` is a single bounded filename component.
+///
+/// Shared with local selection so a reviewed name can never be rejected by
+/// the wire schema and vice versa.
+pub(crate) fn is_valid_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.chars().any(char::is_control)
 }
 
 /// Bounds the untrusted display text length.

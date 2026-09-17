@@ -88,6 +88,7 @@ fn map_terminal_event(event: Event) -> Option<AppEvent> {
     match event {
         Event::Key(key) => map_key(key),
         Event::Resize(width, height) => Some(AppEvent::TerminalResized { width, height }),
+        Event::Paste(text) => Some(AppEvent::Paste(text)),
         _ => None,
     }
 }
@@ -236,13 +237,17 @@ mod tests {
     }
 
     #[test]
-    fn resize_is_forwarded_and_unrelated_terminal_events_are_ignored() {
+    fn resize_and_paste_are_forwarded_and_unrelated_terminal_events_are_ignored() {
         assert_eq!(
             map_terminal_event(crossterm::event::Event::Resize(120, 40)),
             Some(AppEvent::TerminalResized {
                 width: 120,
                 height: 40,
             })
+        );
+        assert_eq!(
+            map_terminal_event(crossterm::event::Event::Paste("a.txt\nb.txt".to_owned())),
+            Some(AppEvent::Paste("a.txt\nb.txt".to_owned()))
         );
         assert_eq!(
             map_terminal_event(crossterm::event::Event::FocusGained),

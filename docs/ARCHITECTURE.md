@@ -42,7 +42,10 @@ listener are owned by the service effect dispatcher. The session owner
 TLS transport and the protocol state machine: it performs the pairing
 request/response exchange, the memory-only one-time code, the four SPAKE2
 records, and the authorized idle session, and it reports every outcome as an
-application event. Transfer and storage adapters remain placeholders.
+application event. `transfer/` owns pasted-path review, the names-and-sizes
+manifest, and the bounded hash/stream engine; `storage/` owns destination name
+rules, restrictive temporary files, and no-replace finalization. The session
+owner connects those local adapters to `DATA` frames in a later feature.
 
 | Area | Owns | Must not own |
 | --- | --- | --- |
@@ -52,6 +55,7 @@ application event. Transfer and storage adapters remain placeholders.
 | `session` | Live connection authorization, proposals, timers | Terminal rendering |
 | `protocol` | Wire ordering and message validation | Sockets, files, or user consent |
 | `transport` | Bounded framed I/O | Authorization and consent policy |
+| `transfer` | Path review, manifest, bounded hashing and streaming | Terminal policy or wire ordering |
 | `storage` | Safe names, temporary files, no-overwrite finalization | TUI or wire policy |
 
 ## Application Event Loop

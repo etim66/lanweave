@@ -1,5 +1,6 @@
 mod chrome;
 mod direct_address;
+mod file_selection;
 mod help;
 mod home;
 mod layout;
@@ -52,6 +53,9 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         Some(Overlay::PairingCode(input)) => {
             pairing_code::render(frame, content, model, input);
         }
+        Some(Overlay::FileSelection(input)) => {
+            file_selection::render(frame, content, model, input);
+        }
         Some(Overlay::Help) => help::render(frame, content, model),
         None => home::render(frame, content, model, ui),
     }
@@ -87,11 +91,14 @@ mod tests {
     use crate::app::action::{DeviceId, KeyInput, PairingPeer, UserAction};
     use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
-    use crate::app::interaction::{UiState, apply_key_input, apply_user_action, reconcile};
-    use crate::app::model::AppModel;
+    use crate::app::interaction::{
+        FileSelectionInput, Overlay, UiState, apply_key_input, apply_user_action, reconcile,
+    };
+    use crate::app::model::{AppModel, AppState};
     use crate::app::reducer::update;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
+    use crate::transfer::selection::{FileSelection, SelectionIssue};
 
     #[test]
     fn basic_screens_render_at_normal_and_small_sizes() {
@@ -169,7 +176,8 @@ mod tests {
         let browsing = render_with_ui(&model, &ui, 80, 24);
         let backgrounds = render_backgrounds_with_ui(&model, &ui, 80, 24);
         assert!(browsing.contains("/devices"));
-        assert!(!browsing.contains("/send"));
+        assert!(browsing.contains("/send"));
+        assert!(!browsing.contains("/disconnect"));
         assert!(backgrounds.contains(&HIGHLIGHT));
 
         apply_key_input(&model, &mut ui, KeyInput::Character('z'));
@@ -190,7 +198,10 @@ mod tests {
             AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
         );
         update(&mut session, AppEvent::PairingSucceeded);
-        update(&mut session, AppEvent::User(UserAction::StartTransfer));
+        update(
+            &mut session,
+            AppEvent::User(UserAction::StartTransfer(FileSelection::default())),
+        );
         let mut session_ui = UiState::default();
         apply_key_input(&session, &mut session_ui, KeyInput::Character('/'));
         let busy = render_with_ui(&session, &session_ui, 80, 24);
@@ -319,6 +330,34 @@ mod tests {
         assert!(output.contains("The port must be a number"));
         assert!(output.contains("enter"));
         assert!(output.contains("esc"));
+    }
+
+    #[test]
+    fn file_review_renders_entries_issues_and_send_state() {
+        let review = FileSelectionInput {
+            text: String::new(),
+            selection: FileSelection::for_test(&[("report.txt", 2048)]),
+            issues: vec![SelectionIssue::for_test(
+                "missing.txt",
+                "the file was not found",
+            )],
+            selected: Some(0),
+        };
+        let ui = UiState::for_test(Overlay::FileSelection(review));
+
+        let session = AppModel::for_test(AppState::SessionIdle);
+        let output = render_with_ui(&session, &ui, 80, 24);
+        assert!(output.contains("Review files"));
+        assert!(output.contains("report.txt"));
+        assert!(output.contains("2.0 KiB"));
+        assert!(output.contains("missing.txt: the file was not found"));
+        assert!(output.contains("Press enter to send"));
+
+        // Outside an authorized idle session the same list cannot be sent.
+        let browsing = AppModel::for_test(AppState::Browsing);
+        let output = render_with_ui(&browsing, &ui, 80, 24);
+        assert!(output.contains("Connect and pair"));
+        assert!(!output.contains("Press enter to send"));
     }
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {

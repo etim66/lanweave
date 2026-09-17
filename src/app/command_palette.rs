@@ -61,9 +61,9 @@ const COMMANDS: [CommandSpec; 6] = [
     CommandSpec {
         id: CommandId::Send,
         name: "/send",
-        description: "Send reviewed files",
+        description: "Review and send files",
         availability: send_availability,
-        action: UserAction::StartTransfer,
+        action: UserAction::OpenFileSelection,
     },
     CommandSpec {
         id: CommandId::Disconnect,
@@ -180,9 +180,12 @@ fn devices_availability(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
-/// Availability for the send command, which needs an idle session.
+/// Availability for the send command.
+///
+/// The review list opens wherever files may be prepared; sending itself is
+/// gated separately on an authorized idle session.
 fn send_availability(capabilities: AppCapabilities) -> CommandAvailability {
-    if capabilities.can_start_transfer {
+    if capabilities.can_review_files {
         CommandAvailability::Enabled
     } else if capabilities.session_closing {
         CommandAvailability::Disabled("The session is closing")
@@ -229,7 +232,7 @@ mod tests {
         assert_eq!(commands[0].action, UserAction::ShowHelp);
         assert_eq!(commands[1].action, UserAction::ShowDevices);
         assert_eq!(commands[2].action, UserAction::OpenDirectAddress);
-        assert_eq!(commands[3].action, UserAction::StartTransfer);
+        assert_eq!(commands[3].action, UserAction::OpenFileSelection);
         assert_eq!(commands[4].action, UserAction::Disconnect);
         assert_eq!(commands[5].action, UserAction::Quit);
     }
@@ -271,7 +274,7 @@ mod tests {
             assert_eq!(
                 availability(CommandId::Send),
                 match state {
-                    AppState::SessionIdle => CommandAvailability::Enabled,
+                    AppState::Browsing | AppState::SessionIdle => CommandAvailability::Enabled,
                     AppState::ClosingSession => {
                         CommandAvailability::Disabled("The session is closing")
                     }
@@ -311,7 +314,11 @@ mod tests {
         let session = AppModel::for_test(AppState::SessionIdle).capabilities();
         assert_eq!(
             resolve(session, "send", Some(CommandId::Send)),
-            Some(UserAction::StartTransfer)
+            Some(UserAction::OpenFileSelection)
+        );
+        assert_eq!(
+            resolve(browsing, "send", Some(CommandId::Send)),
+            Some(UserAction::OpenFileSelection)
         );
         let busy = AppModel::for_test(AppState::OutboundProposal).capabilities();
         assert_eq!(resolve(busy, "send", Some(CommandId::Send)), None);

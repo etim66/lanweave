@@ -148,7 +148,7 @@ async fn dispatch_effects(
             Effect::Disconnect => {
                 session.send(SessionCommand::Disconnect).await?;
             }
-            Effect::StartTransfer | Effect::AcceptTransfer | Effect::RejectTransfer => {}
+            Effect::StartTransfer(_) | Effect::AcceptTransfer | Effect::RejectTransfer => {}
         }
     }
 
