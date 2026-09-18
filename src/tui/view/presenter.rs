@@ -62,17 +62,82 @@ pub(super) fn screen_content(model: &AppModel) -> (String, String, Color) {
             WARNING,
         ),
         Screen::Pairing => pairing_content(model),
-        Screen::Session => (
-            "Authorized session".to_owned(),
-            "The code was confirmed on the live connection. File transfer is not available in this build."
-                .to_owned(),
+        Screen::Session => session_content(model),
+        Screen::Transfer => transfer_content(model),
+    }
+}
+
+/// Returns the authorized-idle title and message.
+fn session_content(model: &AppModel) -> (String, String, Color) {
+    let mut message = "Use /send to review files and transfer them to the other device.".to_owned();
+    if model.deferred_selection().is_some() {
+        message.push_str("\nYour reviewed files are queued; /send restores them for another try.");
+    }
+    ("Authorized session".to_owned(), message, ACCENT)
+}
+
+/// Returns the title and message for each transfer substate.
+fn transfer_content(model: &AppModel) -> (String, String, Color) {
+    match model.state() {
+        AppState::OutboundProposal => {
+            let detail = model
+                .outbound_selection()
+                .map(|selection| {
+                    format!(
+                        "{} file(s), {}. Waiting for the other device to accept.",
+                        selection.len(),
+                        format_size(selection.total_size())
+                    )
+                })
+                .unwrap_or_else(|| "Waiting for the other device to accept.".to_owned());
+            ("Waiting for approval".to_owned(), detail, ACCENT)
+        }
+        AppState::InboundProposalAccepted => (
+            "Preparing to receive".to_owned(),
+            "The file list was accepted; preparing the destination...".to_owned(),
             ACCENT,
         ),
-        Screen::Transfer => (
+        AppState::TransferringOutbound | AppState::TransferringInbound => {
+            let verb = if model.state() == AppState::TransferringOutbound {
+                "Sending"
+            } else {
+                "Receiving"
+            };
+            let detail = model
+                .transfer_progress()
+                .map(|progress| {
+                    format!(
+                        "{verb} file {} of {} ({} transferred).",
+                        u32::from(progress.index) + 1,
+                        progress.files,
+                        format_size(progress.transferred)
+                    )
+                })
+                .unwrap_or_else(|| format!("{verb} files."));
+            ("Transfer".to_owned(), detail, ACCENT)
+        }
+        _ => (
             "Transfer".to_owned(),
-            "Transfer controls are not available in this build.".to_owned(),
+            "The file list is under review.".to_owned(),
             ACCENT,
         ),
+    }
+}
+
+/// Formats a byte count with a binary unit.
+pub(super) fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

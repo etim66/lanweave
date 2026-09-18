@@ -113,8 +113,7 @@ async fn relay_discovery(
 ///
 /// A shutdown effect stops the session owner and the network services, then
 /// reports that shutdown was handled. If the channel closes first, everything
-/// is stopped anyway and `Ok(false)` is returned. Transfer effects stay
-/// no-ops until the transfer feature lands.
+/// is stopped anyway and `Ok(false)` is returned.
 async fn dispatch_effects(
     mut effects: EffectReceiver,
     session: SessionService,
@@ -148,7 +147,19 @@ async fn dispatch_effects(
             Effect::Disconnect => {
                 session.send(SessionCommand::Disconnect).await?;
             }
-            Effect::StartTransfer(_) | Effect::AcceptTransfer | Effect::RejectTransfer => {}
+            Effect::StartTransfer(selection) => {
+                session
+                    .send(SessionCommand::StartTransfer(selection))
+                    .await?;
+            }
+            Effect::AcceptTransfer(destination) => {
+                session
+                    .send(SessionCommand::AcceptTransfer(destination))
+                    .await?;
+            }
+            Effect::RejectTransfer => {
+                session.send(SessionCommand::RejectTransfer).await?;
+            }
         }
     }
 

@@ -8,6 +8,7 @@ mod pairing_code;
 mod palette;
 mod presenter;
 mod theme;
+mod transfer_review;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -56,6 +57,9 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         Some(Overlay::FileSelection(input)) => {
             file_selection::render(frame, content, model, input);
         }
+        Some(Overlay::TransferReview(input)) => {
+            transfer_review::render(frame, content, model, input);
+        }
         Some(Overlay::Help) => help::render(frame, content, model),
         None => home::render(frame, content, model, ui),
     }
@@ -92,12 +96,14 @@ mod tests {
     use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
     use crate::app::interaction::{
-        FileSelectionInput, Overlay, UiState, apply_key_input, apply_user_action, reconcile,
+        FileSelectionInput, Overlay, TransferReviewInput, UiState, apply_key_input,
+        apply_user_action, reconcile,
     };
-    use crate::app::model::{AppModel, AppState};
+    use crate::app::model::{AppModel, AppState, TransferProposal};
     use crate::app::reducer::update;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
+    use crate::protocol::{FileEntry, TransferRequest};
     use crate::transfer::selection::{FileSelection, SelectionIssue};
 
     #[test]
@@ -213,7 +219,7 @@ mod tests {
     fn help_overlay_and_palette_render_on_small_terminals() {
         let model = AppModel::new();
         let mut ui = UiState::default();
-        apply_user_action(&mut ui, UserAction::ShowHelp);
+        apply_user_action(&model, &mut ui, UserAction::ShowHelp);
         assert!(render_with_ui(&model, &ui, 80, 24).contains("keyboard controls"));
 
         apply_key_input(&model, &mut ui, KeyInput::Character('/'));
@@ -319,7 +325,7 @@ mod tests {
     fn direct_address_card_renders_input_and_validation() {
         let model = browsing_with(&[]);
         let mut ui = UiState::default();
-        apply_user_action(&mut ui, UserAction::OpenDirectAddress);
+        apply_user_action(&model, &mut ui, UserAction::OpenDirectAddress);
         for character in "peer.local:abc".chars() {
             apply_key_input(&model, &mut ui, KeyInput::Character(character));
         }
@@ -358,6 +364,52 @@ mod tests {
         let output = render_with_ui(&browsing, &ui, 80, 24);
         assert!(output.contains("Connect and pair"));
         assert!(!output.contains("Press enter to send"));
+    }
+
+    #[test]
+    fn inbound_transfer_review_renders_manifest_and_destination() {
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::IncomingTransferRequest(TransferProposal::new(
+                &TransferRequest::new(vec![
+                    FileEntry {
+                        name: "report.txt".to_owned(),
+                        size: 2048,
+                    },
+                    FileEntry {
+                        name: "photo.jpg".to_owned(),
+                        size: 1,
+                    },
+                ])
+                .unwrap(),
+                Some("peer".to_owned()),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("Incoming files"));
+        assert!(output.contains("report.txt"));
+        assert!(output.contains("photo.jpg"));
+        assert!(output.contains("2.0 KiB"));
+        assert!(output.contains("From peer"));
+        assert!(output.contains("Save to:"));
+
+        // Tiny terminals fall back to a single count line.
+        let tiny = render_with_ui(&model, &ui, 30, 4);
+        assert!(tiny.contains("2 incoming file(s)"));
+
+        // At six rows the error keeps its reserved row above the destination.
+        let mut error_ui = UiState::for_test(Overlay::TransferReview(TransferReviewInput {
+            destination: "/tmp".to_owned(),
+            error: Some("Enter an existing directory"),
+        }));
+        reconcile(&model, &mut error_ui);
+        let small = render_with_ui(&model, &error_ui, 80, 6);
+        assert!(small.contains("Enter an existing directory"));
+        assert!(small.contains("Save to:"));
     }
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {

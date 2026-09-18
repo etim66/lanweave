@@ -13,6 +13,7 @@
 //! `AppEvent` and only touch application state through those events.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -24,13 +25,18 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::app::action::{ConnectionTarget, PairingPeer};
 use crate::app::event::AppEvent;
+use crate::app::model::{TransferProgress, TransferProposal};
 use crate::app::runtime::EventSender;
 use crate::framing::Frame;
 use crate::pairing::{self, PairingCode};
 use crate::protocol::{
-    self, Control, Hello, PairRejection, PairResponse, PairingRecord, PairingStep, ProtocolAction,
-    ProtocolState, Role,
+    self, CancelCode, Control, ErrorCode, ErrorMessage, FileEnd, FileResult, Hello, PairRejection,
+    PairResponse, PairingRecord, PairingStep, Phase, ProtocolAction, ProtocolState, Role,
+    TransferCancel, TransferRejection, TransferRequest, TransferResponse,
 };
+use crate::storage::{Destination, StorageError};
+use crate::transfer::engine::{self, IncomingFile};
+use crate::transfer::selection::{FileSelection, SelectedFile};
 use crate::transport::{self, FramedConnection, Outbound, split_frame_io};
 
 /// Capacity of the effect-to-session command queue.
@@ -78,6 +84,9 @@ pub(crate) enum SessionCommand {
     RejectPairing,
     RejectPairingBusy,
     SubmitPairingCode(PairingCode),
+    StartTransfer(FileSelection),
+    AcceptTransfer(PathBuf),
+    RejectTransfer,
     Disconnect,
 }
 
@@ -144,6 +153,9 @@ enum ConnectionCommand {
     Decide(bool),
     RejectBusy,
     SubmitCode(PairingCode),
+    StartTransfer(FileSelection),
+    AcceptTransfer(PathBuf),
+    RejectTransfer,
     Close,
 }
 
@@ -266,6 +278,13 @@ fn connection_command(command: SessionCommand) -> Option<ConnectionCommand> {
         SessionCommand::RejectPairing => Some(ConnectionCommand::Decide(false)),
         SessionCommand::RejectPairingBusy => Some(ConnectionCommand::RejectBusy),
         SessionCommand::SubmitPairingCode(code) => Some(ConnectionCommand::SubmitCode(code)),
+        SessionCommand::StartTransfer(selection) => {
+            Some(ConnectionCommand::StartTransfer(selection))
+        }
+        SessionCommand::AcceptTransfer(destination) => {
+            Some(ConnectionCommand::AcceptTransfer(destination))
+        }
+        SessionCommand::RejectTransfer => Some(ConnectionCommand::RejectTransfer),
         SessionCommand::Disconnect => Some(ConnectionCommand::Close),
         // The manager handles `Connect` before this routing step.
         SessionCommand::Connect(_) => None,
@@ -355,6 +374,8 @@ struct SessionConnection {
     connection: FramedConnection<tokio_rustls::TlsStream<TcpStream>>,
     outbound: Outbound,
     protocol: ProtocolState,
+    /// The peer's untrusted `hello` display name, shown on transfer review.
+    peer_name: Option<String>,
 }
 
 impl SessionConnection {
@@ -365,27 +386,30 @@ impl SessionConnection {
             connection,
             outbound,
             protocol: ProtocolState::new(role),
+            peer_name: None,
         }
     }
 
-    /// Validates and queues one control, returning its exact JSON body.
-    async fn send_control(&mut self, control: &Control) -> FlowResult<Bytes> {
-        protocol::send(&mut self.protocol, control).map_err(|_| FlowOutcome::Failed)?;
-        let body = Bytes::from(control.encode());
+    /// Validates and queues one control, returning its protocol actions.
+    async fn send_control(&mut self, control: &Control) -> FlowResult<Vec<ProtocolAction>> {
+        let actions =
+            protocol::send(&mut self.protocol, control).map_err(|_| FlowOutcome::Failed)?;
         self.outbound
             .send_control(control)
             .await
             .map_err(|_| FlowOutcome::Failed)?;
-        Ok(body)
+        Ok(actions)
     }
 
     /// Validates and queues one control, waiting until it is flushed.
-    async fn send_control_flushed(&mut self, control: &Control) -> FlowResult<()> {
-        protocol::send(&mut self.protocol, control).map_err(|_| FlowOutcome::Failed)?;
+    async fn send_control_flushed(&mut self, control: &Control) -> FlowResult<Vec<ProtocolAction>> {
+        let actions =
+            protocol::send(&mut self.protocol, control).map_err(|_| FlowOutcome::Failed)?;
         self.outbound
             .send_control_flushed(control)
             .await
-            .map_err(|_| FlowOutcome::Failed)
+            .map_err(|_| FlowOutcome::Failed)?;
+        Ok(actions)
     }
 
     /// Flushes queued frames and shuts the write half down cleanly.
@@ -396,13 +420,13 @@ impl SessionConnection {
         self.outbound.close().await;
     }
 
-    /// Reads and validates one inbound control, keeping its exact body.
+    /// Reads and validates one inbound frame.
     ///
     /// `Ok(None)` means the peer closed cleanly; `Err` is a terminal outcome.
     /// A control the protocol layer treats as terminal (a peer `error`, a
     /// rejection, or `session_close`) ends the connection immediately instead
     /// of waiting for the peer to close.
-    async fn read(&mut self) -> FlowResult<Option<InboundControl>> {
+    async fn read(&mut self) -> FlowResult<Option<InboundMessage>> {
         match self
             .connection
             .read_frame()
@@ -423,18 +447,33 @@ impl SessionConnection {
                 if actions.contains(&ProtocolAction::SessionClosed) {
                     return Err(FlowOutcome::SessionEnded);
                 }
-                Ok(Some(InboundControl { control, body }))
+                Ok(Some(InboundMessage::Control(InboundControl {
+                    control,
+                    body,
+                    actions,
+                })))
             }
-            // This feature has no transfer, so DATA is always a violation.
-            Some(Frame::Data(_)) => Err(FlowOutcome::Failed),
+            Some(Frame::Data(body)) => {
+                protocol::accept(&mut self.protocol, protocol::Inbound::Data(body.clone()))
+                    .map_err(|_| FlowOutcome::Failed)?;
+                Ok(Some(InboundMessage::Data(body)))
+            }
         }
     }
+}
+
+/// A validated inbound frame: a control with its actions, or file bytes.
+enum InboundMessage {
+    Control(InboundControl),
+    Data(Bytes),
 }
 
 /// A validated inbound control with its exact JSON body.
 struct InboundControl {
     control: Control,
     body: Bytes,
+    /// Protocol work the control produced, such as a busy response.
+    actions: Vec<ProtocolAction>,
 }
 
 /// One stage result: a control, a command, a close, or the deadline.
@@ -461,7 +500,10 @@ async fn wait_stage(
         }),
         result = timeout_at(deadline, connection.read()) => match result {
             Err(_) => Ok(Stage::TimedOut),
-            Ok(Ok(Some(inbound))) => Ok(Stage::Control(inbound)),
+            Ok(Ok(Some(InboundMessage::Control(inbound)))) => Ok(Stage::Control(inbound)),
+            // DATA is rejected by the protocol state in every stage that uses
+            // this wait, so it can only mean a peer bug.
+            Ok(Ok(Some(InboundMessage::Data(_)))) => Err(FlowOutcome::Failed),
             Ok(Ok(None)) => Ok(Stage::Finished),
             Ok(Err(outcome)) => Err(outcome),
         },
@@ -495,7 +537,8 @@ async fn read_control_only(
 ) -> FlowResult<InboundControl> {
     match timeout_at(deadline, connection.read()).await {
         Err(_) => Err(FlowOutcome::Ended),
-        Ok(Ok(Some(inbound))) => Ok(inbound),
+        Ok(Ok(Some(InboundMessage::Control(inbound)))) => Ok(inbound),
+        Ok(Ok(Some(InboundMessage::Data(_)))) => Err(FlowOutcome::Failed),
         Ok(Ok(None)) => Err(FlowOutcome::Ended),
         Ok(Err(outcome)) => Err(outcome),
     }
@@ -595,20 +638,23 @@ async fn initiator_pairing(
     timeouts: SessionTimeouts,
 ) -> FlowOutcome {
     // The initiator sends the first hello and retains the exact JSON body.
-    let initiator_hello = match connection
+    let initiator_hello = Bytes::from(Control::Hello(Hello::new(None)).encode());
+    if let Err(outcome) = connection
         .send_control(&Control::Hello(Hello::new(None)))
         .await
     {
-        Ok(body) => body,
-        Err(outcome) => return outcome,
-    };
+        return outcome;
+    }
     let inbound =
         match read_control(connection, &mut commands, Instant::now() + timeouts.control).await {
             Ok(inbound) => inbound,
             Err(outcome) => return outcome,
         };
     let responder_hello = match inbound.control {
-        Control::Hello(_) => inbound.body,
+        Control::Hello(hello) => {
+            connection.peer_name = hello.display_name;
+            inbound.body
+        }
         _ => return FlowOutcome::Failed,
     };
 
@@ -709,7 +755,7 @@ async fn initiator_pairing(
     // The code is consumed and the session becomes authorized.
     drop(code);
     let _ = events.send(AppEvent::PairingSucceeded).await;
-    idle_authorized(connection, &mut commands).await
+    idle_authorized(connection, &mut commands, events, timeouts).await
 }
 
 /// Reads the responder's `pair_response`, returning whether it accepted.
@@ -825,13 +871,14 @@ async fn responder_pairing(
         _ => return FlowOutcome::Failed,
     };
     let initiator_hello = inbound.body;
-    let responder_hello = match connection
+    connection.peer_name = display_name.clone();
+    let responder_hello = Bytes::from(Control::Hello(Hello::new(None)).encode());
+    if let Err(outcome) = connection
         .send_control(&Control::Hello(Hello::new(None)))
         .await
     {
-        Ok(body) => body,
-        Err(outcome) => return outcome,
-    };
+        return outcome;
+    }
     match read_control(connection, &mut commands, Instant::now() + timeouts.control).await {
         Ok(inbound) if matches!(inbound.control, Control::PairRequest) => {}
         Ok(_) => return FlowOutcome::Failed,
@@ -959,48 +1006,616 @@ async fn responder_pairing(
     }
 
     let _ = events.send(AppEvent::PairingSucceeded).await;
-    idle_authorized(connection, &mut commands).await
+    idle_authorized(connection, &mut commands, events, timeouts).await
 }
 
-/// Keeps an authorized connection open until either side ends it.
+/// Keeps an authorized connection open across any number of transfers.
 ///
-/// Transfer policy is a later feature; a `transfer_request` is validated by
-/// the protocol state and then ignored here.
+/// Each round is one idle wait followed by either an outbound or inbound
+/// transfer. `Ok(())` means the session returned to idle; every error ends
+/// the authorized session.
 async fn idle_authorized(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
+    events: &EventSender,
+    timeouts: SessionTimeouts,
 ) -> FlowOutcome {
+    loop {
+        match session_round(connection, commands, events, timeouts).await {
+            Ok(()) => continue,
+            // Any failure after authorization closes the session cleanly so
+            // in-flight DATA cannot enter a later transfer.
+            Err(_) => return FlowOutcome::SessionEnded,
+        }
+    }
+}
+
+/// Waits for the next transfer proposal or a local command while idle.
+async fn session_round(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    events: &EventSender,
+    timeouts: SessionTimeouts,
+) -> FlowResult<()> {
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return FlowOutcome::SessionEnded,
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::StartTransfer(selection)) => {
+                    return run_outbound(connection, commands, events, selection, timeouts).await;
+                }
+                // A stale prompt decision or a racing local proposal cannot
+                // start anything here; the protocol actions are authoritative.
                 Some(_) => continue,
             },
-            result = connection.read() => match result {
-                // Transfer controls are validated by the protocol state and
-                // ignored until the transfer feature lands.
-                Ok(Some(_)) => continue,
-                Ok(None) | Err(_) => return FlowOutcome::SessionEnded,
+            result = connection.read() => match result? {
+                None => return Err(FlowOutcome::SessionEnded),
+                // DATA is rejected by the protocol state while idle.
+                Some(InboundMessage::Data(_)) => return Err(FlowOutcome::Failed),
+                Some(InboundMessage::Control(inbound)) => {
+                    if let Control::TransferRequest(request) = inbound.control {
+                        return run_review(connection, commands, events, request, timeouts).await;
+                    }
+                    // A stale collision response is consumed by the protocol
+                    // state; anything else valid here is ignored.
+                }
             },
         }
     }
 }
 
+/// The peer's decision on a pending outbound proposal.
+enum ResponseDecision {
+    /// The peer accepted; its `ready` follows.
+    Accepted,
+    /// The peer rejected or cancelled; only this proposal ended.
+    Ended,
+    /// The responder withdrew its proposal and this inbound request won.
+    Withdrawn(TransferRequest),
+    /// No decision arrived before the local deadline.
+    TimedOut,
+}
+
+/// Sends one immutable manifest and drives the resulting transfer.
+async fn run_outbound(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    events: &EventSender,
+    selection: FileSelection,
+    timeouts: SessionTimeouts,
+) -> FlowResult<()> {
+    let Some(request) = selection.request() else {
+        // The app only proposes reviewed selections; recover instead of
+        // stalling if an empty one ever reaches this layer.
+        let _ = events.send(AppEvent::ProposalRejected).await;
+        return Ok(());
+    };
+    connection
+        .send_control(&Control::TransferRequest(request))
+        .await?;
+
+    let response = wait_transfer_response(
+        connection,
+        commands,
+        Instant::now() + timeouts.prompt + timeouts.control,
+    )
+    .await?;
+    match response {
+        ResponseDecision::Accepted => {}
+        ResponseDecision::Withdrawn(request) => {
+            return run_review(connection, commands, events, request, timeouts).await;
+        }
+        ResponseDecision::Ended => {
+            let _ = events.send(AppEvent::ProposalRejected).await;
+            return Ok(());
+        }
+        ResponseDecision::TimedOut => {
+            let _ = connection
+                .send_control(&Control::TransferCancel(TransferCancel {
+                    code: CancelCode::UserCancelled,
+                }))
+                .await;
+            let _ = events.send(AppEvent::ProposalRejected).await;
+            return Ok(());
+        }
+    }
+
+    let ready = wait_ready(connection, commands, Instant::now() + timeouts.control).await?;
+    if !ready {
+        let _ = events.send(AppEvent::ProposalRejected).await;
+        return Ok(());
+    }
+    run_sending(connection, commands, events, selection).await
+}
+
+/// Maps the phase after a peer `transfer_response` to its decision.
+///
+/// A stale `busy` response for a withdrawn proposal is consumed by the
+/// protocol state without changing the phase, so `None` means the response
+/// did not decide the current proposal and the wait must continue.
+fn response_decision(phase: &Phase) -> Option<ResponseDecision> {
+    match phase {
+        Phase::Idle => Some(ResponseDecision::Ended),
+        Phase::Sending { .. } => Some(ResponseDecision::Accepted),
+        _ => None,
+    }
+}
+
+/// Waits for the peer's response, answering any racing proposal as busy.
+async fn wait_transfer_response(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    deadline: Instant,
+) -> FlowResult<ResponseDecision> {
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(_) => continue,
+            },
+            result = timeout_at(deadline, connection.read()) => match result {
+                Err(_) => return Ok(ResponseDecision::TimedOut),
+                Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
+                    send_actions(connection, &inbound.actions).await?;
+                    match &inbound.control {
+                        Control::TransferResponse(_) => {
+                            if let Some(decision) =
+                                response_decision(connection.protocol.phase())
+                            {
+                                return Ok(decision);
+                            }
+                            // The stale busy for the withdrawn proposal was
+                            // consumed without deciding this proposal.
+                        }
+                        Control::TransferCancel(_) => return Ok(ResponseDecision::Ended),
+                        // The collision rule withdrew the responder's own
+                        // proposal, so the peer's request wins instead.
+                        Control::TransferRequest(request)
+                            if matches!(connection.protocol.phase(), Phase::Reviewing { .. }) =>
+                        {
+                            return Ok(ResponseDecision::Withdrawn(request.clone()));
+                        }
+                        _ => continue,
+                    }
+                }
+                Ok(Ok(Some(InboundMessage::Data(_)))) => continue,
+                Ok(Ok(None)) => return Err(FlowOutcome::SessionEnded),
+                Ok(Err(outcome)) => return Err(outcome),
+            },
+        }
+    }
+}
+
+/// Waits for `ready` after an accepted response.
+///
+/// A deadline or peer cancellation before any DATA sends a `transfer_cancel`
+/// and returns `false`; the session stays authorized.
+async fn wait_ready(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    deadline: Instant,
+) -> FlowResult<bool> {
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(_) => continue,
+            },
+            result = timeout_at(deadline, connection.read()) => match result {
+                Err(_) => {
+                    let _ = connection
+                        .send_control(&Control::TransferCancel(TransferCancel {
+                            code: CancelCode::UserCancelled,
+                        }))
+                        .await;
+                    return Ok(false);
+                }
+                Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
+                    send_actions(connection, &inbound.actions).await?;
+                    match inbound.control {
+                        Control::Ready => return Ok(true),
+                        Control::TransferCancel(_) => return Ok(false),
+                        _ => continue,
+                    }
+                }
+                Ok(Ok(Some(InboundMessage::Data(_)))) => continue,
+                Ok(Ok(None)) => return Err(FlowOutcome::SessionEnded),
+                Ok(Err(outcome)) => return Err(outcome),
+            },
+        }
+    }
+}
+
+/// The recipient's decision on an inbound proposal.
+enum ReviewDecision {
+    /// The local user accepted and chose the destination directory.
+    Accept(PathBuf),
+    /// The local user rejected.
+    Reject,
+    /// The peer cancelled the proposal before any local decision.
+    Ended,
+    /// The local review deadline elapsed.
+    TimedOut,
+}
+
+/// Shows one inbound manifest and waits for the local decision.
+async fn run_review(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    events: &EventSender,
+    request: TransferRequest,
+    timeouts: SessionTimeouts,
+) -> FlowResult<()> {
+    let proposal = TransferProposal::new(&request, connection.peer_name.clone());
+    let _ = events
+        .send(AppEvent::IncomingTransferRequest(proposal))
+        .await;
+
+    let decision =
+        wait_transfer_decision(connection, commands, Instant::now() + timeouts.prompt).await?;
+    match decision {
+        ReviewDecision::Accept(destination) => {
+            let destination = Destination::new(destination);
+            match prepare_transfer(&request, &destination).await {
+                Ok(first) => {
+                    connection
+                        .send_control(&Control::TransferResponse(TransferResponse::accepted()))
+                        .await?;
+                    connection.send_control(&Control::Ready).await?;
+                    run_receiving(connection, commands, events, request, destination, first).await
+                }
+                Err(reason) => {
+                    let _ = connection
+                        .send_control(&Control::TransferResponse(TransferResponse::rejected(
+                            reason,
+                        )))
+                        .await;
+                    let _ = events.send(AppEvent::ProposalRejected).await;
+                    Ok(())
+                }
+            }
+        }
+        ReviewDecision::Reject => {
+            let _ = connection
+                .send_control(&Control::TransferResponse(TransferResponse::rejected(
+                    TransferRejection::UserRejected,
+                )))
+                .await;
+            Ok(())
+        }
+        ReviewDecision::Ended => {
+            let _ = events.send(AppEvent::ProposalRejected).await;
+            Ok(())
+        }
+        ReviewDecision::TimedOut => {
+            let _ = connection
+                .send_control(&Control::TransferResponse(TransferResponse::rejected(
+                    TransferRejection::Timeout,
+                )))
+                .await;
+            let _ = events.send(AppEvent::ProposalRejected).await;
+            Ok(())
+        }
+    }
+}
+
+/// Waits for the local accept or reject decision on an inbound proposal.
+async fn wait_transfer_decision(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    deadline: Instant,
+) -> FlowResult<ReviewDecision> {
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::AcceptTransfer(destination)) => {
+                    return Ok(ReviewDecision::Accept(destination));
+                }
+                Some(ConnectionCommand::RejectTransfer) => return Ok(ReviewDecision::Reject),
+                Some(_) => continue,
+            },
+            result = timeout_at(deadline, connection.read()) => match result {
+                Err(_) => return Ok(ReviewDecision::TimedOut),
+                Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
+                    send_actions(connection, &inbound.actions).await?;
+                    match inbound.control {
+                        Control::TransferCancel(_) => return Ok(ReviewDecision::Ended),
+                        // A stale busy response for a withdrawn proposal is
+                        // consumed by the protocol state; ignore it.
+                        _ => continue,
+                    }
+                }
+                Ok(Ok(Some(InboundMessage::Data(_)))) => continue,
+                Ok(Ok(None)) => return Err(FlowOutcome::SessionEnded),
+                Ok(Err(outcome)) => return Err(outcome),
+            },
+        }
+    }
+}
+
+/// Validates the manifest and prepares the first partial file.
+async fn prepare_transfer(
+    request: &TransferRequest,
+    destination: &Destination,
+) -> Result<IncomingFile, TransferRejection> {
+    destination
+        .check_manifest(&request.files)
+        .map_err(rejection_for)?;
+    let first = request
+        .files
+        .first()
+        .ok_or(TransferRejection::InvalidManifest)?;
+    IncomingFile::begin(destination, first)
+        .await
+        .map_err(rejection_for)
+}
+
+/// Maps one local storage failure to the closed wire rejection.
+const fn rejection_for(error: StorageError) -> TransferRejection {
+    match error {
+        StorageError::InvalidManifest => TransferRejection::InvalidManifest,
+        StorageError::InvalidName => TransferRejection::InvalidFilename,
+        StorageError::NameConflict => TransferRejection::NameConflict,
+        StorageError::DestinationExists => TransferRejection::DestinationExists,
+        StorageError::InvalidDestination | StorageError::Io => TransferRejection::Unavailable,
+    }
+}
+
+/// Streams every reviewed file in manifest order.
+async fn run_sending(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    events: &EventSender,
+    selection: FileSelection,
+) -> FlowResult<()> {
+    let files = u16::try_from(selection.len()).map_err(|_| FlowOutcome::Failed)?;
+    let _ = events.send(AppEvent::TransferStarted).await;
+    for index in 0..files {
+        let file = &selection.files()[usize::from(index)];
+        let _ = events.send(progress_event(index, files, 0)).await;
+        if stream_one_file(connection, commands, file, index).await? {
+            let _ = events.send(AppEvent::TransferFinished).await;
+            return Ok(());
+        }
+        let _ = events.send(progress_event(index, files, file.size())).await;
+    }
+    Err(FlowOutcome::Failed)
+}
+
+/// Streams one reviewed file and waits for its verified result.
+///
+/// Returns `true` when the result completed the whole transfer.
+async fn stream_one_file(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    file: &SelectedFile,
+    index: u16,
+) -> FlowResult<bool> {
+    let (sender, mut receiver) = mpsc::channel(engine::DATA_CHANNEL_CAPACITY);
+    let path = file.path().to_owned();
+    let size = file.size();
+    let sender_task = tokio::spawn(async move { engine::send_file(&path, size, &sender).await });
+
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(_) => continue,
+            },
+            chunk = receiver.recv() => match chunk {
+                Some(chunk) => {
+                    protocol::send_data(&connection.protocol).map_err(|_| FlowOutcome::Failed)?;
+                    // The writer prefers queued DATA, so the file_end queued
+                    // after the last chunk can never overtake it.
+                    connection
+                        .outbound
+                        .send_data(chunk)
+                        .await
+                        .map_err(|_| FlowOutcome::Failed)?;
+                }
+                None => break,
+            },
+            result = connection.read() => match result? {
+                None => return Err(FlowOutcome::SessionEnded),
+                // No control and no DATA are valid before this file_end.
+                Some(_) => return Err(FlowOutcome::Failed),
+            },
+        }
+    }
+
+    let digest = match sender_task.await {
+        Ok(Ok(digest)) => digest,
+        Ok(Err(_)) | Err(_) => {
+            // The reviewed source changed or failed: withdraw after ready,
+            // which closes the session because DATA may be in flight.
+            let _ = connection
+                .send_control(&Control::TransferCancel(TransferCancel {
+                    code: CancelCode::SourceUnavailable,
+                }))
+                .await;
+            return Err(FlowOutcome::SessionEnded);
+        }
+    };
+
+    connection
+        .send_control(&Control::FileEnd(FileEnd {
+            index,
+            sha256: digest,
+        }))
+        .await?;
+    wait_file_result(connection, commands).await
+}
+
+/// Waits for the recipient's verified result for the current file.
+async fn wait_file_result(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+) -> FlowResult<bool> {
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(_) => continue,
+            },
+            result = connection.read() => match result? {
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(InboundMessage::Data(_)) => return Err(FlowOutcome::Failed),
+                Some(InboundMessage::Control(inbound)) => {
+                    send_actions(connection, &inbound.actions).await?;
+                    match inbound.control {
+                        Control::FileResult(_) => {
+                            return Ok(inbound
+                                .actions
+                                .contains(&ProtocolAction::TransferFinished));
+                        }
+                        Control::TransferCancel(_) => return Err(FlowOutcome::SessionEnded),
+                        _ => continue,
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// Receives every manifest entry in order and verifies each digest.
+async fn run_receiving(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    events: &EventSender,
+    request: TransferRequest,
+    destination: Destination,
+    mut incoming: IncomingFile,
+) -> FlowResult<()> {
+    let files = u16::try_from(request.files.len()).map_err(|_| FlowOutcome::Failed)?;
+    let _ = events.send(AppEvent::TransferStarted).await;
+    let _ = events.send(progress_event(0, files, 0)).await;
+    let mut index = 0u16;
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                Some(_) => continue,
+            },
+            result = connection.read() => match result? {
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(InboundMessage::Data(chunk)) => {
+                    if incoming.write(&chunk).await.is_err() {
+                        // The partial file is removed when it is dropped.
+                        report_internal_error(connection).await;
+                        return Err(FlowOutcome::SessionEnded);
+                    }
+                }
+                Some(InboundMessage::Control(inbound)) => {
+                    match inbound.control {
+                        Control::FileEnd(file_end) => {
+                            if file_end.index != index {
+                                return Err(FlowOutcome::Failed);
+                            }
+                            let finished_size = request.files[usize::from(index)].size;
+                            match incoming.finish(file_end.sha256).await {
+                                Ok(()) => {
+                                    let actions = connection
+                                        .send_control(&Control::FileResult(
+                                            FileResult::verified(index),
+                                        ))
+                                        .await?;
+                                    if actions.contains(&ProtocolAction::TransferFinished) {
+                                        let _ = events.send(AppEvent::TransferFinished).await;
+                                        return Ok(());
+                                    }
+                                }
+                                Err(failure) => {
+                                    // Protocol state closes the session after
+                                    // a failed result; keep the verified prefix.
+                                    let _ = connection
+                                        .send_control(&Control::FileResult(
+                                            FileResult::failed(index, failure),
+                                        ))
+                                        .await;
+                                    return Err(FlowOutcome::SessionEnded);
+                                }
+                            }
+                            let _ = events
+                                .send(progress_event(index, files, finished_size))
+                                .await;
+                            index += 1;
+                            let entry = &request.files[usize::from(index)];
+                            incoming = match IncomingFile::begin(&destination, entry).await {
+                                Ok(incoming) => incoming,
+                                Err(_) => {
+                                    report_internal_error(connection).await;
+                                    return Err(FlowOutcome::SessionEnded);
+                                }
+                            };
+                            let _ = events.send(progress_event(index, files, 0)).await;
+                        }
+                        Control::TransferCancel(_) => return Err(FlowOutcome::SessionEnded),
+                        _ => continue,
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// Reports a local failure that makes safe continuation impossible.
+async fn report_internal_error(connection: &mut SessionConnection) {
+    let _ = connection
+        .send_control_flushed(&Control::Error(ErrorMessage {
+            code: ErrorCode::InternalError,
+        }))
+        .await;
+}
+
+/// Queues every protocol action that asks for a control response.
+async fn send_actions(
+    connection: &mut SessionConnection,
+    actions: &[ProtocolAction],
+) -> FlowResult<()> {
+    for action in actions {
+        if let ProtocolAction::Send(control) = action {
+            connection.send_control(control).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds one per-file progress event.
+fn progress_event(index: u16, files: u16, transferred: u64) -> AppEvent {
+    AppEvent::TransferProgress(TransferProgress {
+        index,
+        files,
+        transferred,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use bytes::Bytes;
+    use rand_core::{OsRng, UnwrapErr};
     use tokio::net::TcpListener;
     use tokio::time::timeout;
 
-    use super::{SessionCommand, SessionService, SessionTimeouts, accepted_channel};
+    use super::{
+        ResponseDecision, SessionCommand, SessionService, SessionTimeouts, accepted_channel,
+        response_decision,
+    };
     use crate::app::action::{ConnectionTarget, DirectEndpoint};
     use crate::app::event::AppEvent;
     use crate::app::runtime::{EventReceiver, event_channel};
     use crate::framing::Frame;
     use crate::pairing::PairingCode;
-    use crate::protocol::{Control, ErrorCode, ErrorMessage, Hello, PairRejection};
+    use crate::protocol::{
+        Control, ErrorCode, ErrorMessage, FileEntry, Hello, PairRejection, PairingRecord,
+        PairingStep, Phase, TransferRejection, TransferRequest, TransferResponse,
+    };
+    use crate::transfer::selection::FileSelection;
+    use crate::transport::{FramedConnection, Outbound, TlsHandshake};
 
     /// Short deadlines so one test covers several stages quickly.
     fn test_timeouts() -> SessionTimeouts {
@@ -1473,5 +2088,442 @@ mod tests {
 
         responder.stop().await;
         initiator.stop().await;
+    }
+
+    /// Waits for the first event matching `predicate`, skipping progress noise.
+    async fn next_matching(
+        events: &mut EventReceiver,
+        mut predicate: impl FnMut(&AppEvent) -> bool,
+    ) -> AppEvent {
+        loop {
+            let event = next_event(events).await;
+            if predicate(&event) {
+                return event;
+            }
+        }
+    }
+
+    /// Pairs two services over a real loopback connection.
+    async fn pair_services(
+        initiator: &SessionService,
+        initiator_events: &mut EventReceiver,
+        responder: &SessionService,
+        responder_events: &mut EventReceiver,
+        address: std::net::SocketAddr,
+    ) {
+        initiator
+            .send(SessionCommand::Connect(direct(address)))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(responder_events).await,
+            AppEvent::IncomingPairingRequest(_)
+        ));
+        responder.send(SessionCommand::AcceptPairing).await.unwrap();
+        let code = next_code(responder_events).await;
+        assert!(matches!(
+            next_event(initiator_events).await,
+            AppEvent::PairingAccepted
+        ));
+        initiator
+            .send(SessionCommand::SubmitPairingCode(code))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(responder_events).await,
+            AppEvent::PairingSucceeded
+        ));
+        assert!(matches!(
+            next_event(initiator_events).await,
+            AppEvent::PairingSucceeded
+        ));
+    }
+
+    /// Creates an empty temporary directory for one test.
+    fn temp_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("lanweave-session-{tag}-{:016x}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Reviews existing files into one outbound selection.
+    fn selection(paths: &[&Path]) -> FileSelection {
+        let mut selection = FileSelection::default();
+        let input = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(selection.add_text(&input).is_empty());
+        selection
+    }
+
+    /// Waits until the transfer reaches its running state.
+    async fn wait_started(events: &mut EventReceiver) {
+        assert!(matches!(
+            next_matching(events, |event| matches!(event, AppEvent::TransferStarted)).await,
+            AppEvent::TransferStarted
+        ));
+    }
+
+    /// Waits until the transfer finishes.
+    async fn wait_finished(events: &mut EventReceiver) {
+        assert!(matches!(
+            next_matching(events, |event| matches!(event, AppEvent::TransferFinished)).await,
+            AppEvent::TransferFinished
+        ));
+    }
+
+    /// Waits for the next inbound proposal and returns its file names.
+    async fn next_proposal(events: &mut EventReceiver) -> Vec<(String, u64)> {
+        let AppEvent::IncomingTransferRequest(proposal) = next_matching(events, |event| {
+            matches!(event, AppEvent::IncomingTransferRequest(_))
+        })
+        .await
+        else {
+            unreachable!("the predicate only matches proposals");
+        };
+        proposal
+            .files()
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.size))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn loopback_transfers_reuse_one_session_in_both_directions() {
+        let source = temp_root("source");
+        let first_destination = temp_root("first-destination");
+        let reverse_destination = temp_root("reverse-destination");
+        let retry_destination = temp_root("retry-destination");
+
+        let report = source.join("report.txt");
+        std::fs::write(&report, b"report body").unwrap();
+        let empty = source.join("empty.bin");
+        std::fs::write(&empty, b"").unwrap();
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let (initiator, mut initiator_events) = initiator_under_test(test_timeouts()).await;
+        pair_services(
+            &initiator,
+            &mut initiator_events,
+            &responder,
+            &mut responder_events,
+            address,
+        )
+        .await;
+
+        // Forward transfer: the responder chooses where files are stored.
+        let outbound = selection(&[&report, &empty]);
+        initiator
+            .send(SessionCommand::StartTransfer(outbound))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("report.txt".to_owned(), 11), ("empty.bin".to_owned(), 0)]
+        );
+        responder
+            .send(SessionCommand::AcceptTransfer(first_destination.clone()))
+            .await
+            .unwrap();
+        wait_started(&mut initiator_events).await;
+        wait_started(&mut responder_events).await;
+        wait_finished(&mut initiator_events).await;
+        wait_finished(&mut responder_events).await;
+        assert_eq!(
+            std::fs::read(first_destination.join("report.txt")).unwrap(),
+            b"report body"
+        );
+        assert_eq!(
+            std::fs::read(first_destination.join("empty.bin")).unwrap(),
+            b""
+        );
+
+        // The same session carries a reverse transfer.
+        responder
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut initiator_events).await,
+            [("report.txt".to_owned(), 11)]
+        );
+        initiator
+            .send(SessionCommand::AcceptTransfer(reverse_destination.clone()))
+            .await
+            .unwrap();
+        wait_started(&mut initiator_events).await;
+        wait_started(&mut responder_events).await;
+        wait_finished(&mut initiator_events).await;
+        wait_finished(&mut responder_events).await;
+        assert_eq!(
+            std::fs::read(reverse_destination.join("report.txt")).unwrap(),
+            b"report body"
+        );
+
+        // A rejection before ready keeps the session open for another try.
+        let retry = selection(&[&report]);
+        initiator
+            .send(SessionCommand::StartTransfer(retry.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("report.txt".to_owned(), 11)]
+        );
+        responder
+            .send(SessionCommand::RejectTransfer)
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_matching(&mut initiator_events, |event| matches!(
+                event,
+                AppEvent::ProposalRejected
+            ))
+            .await,
+            AppEvent::ProposalRejected
+        ));
+
+        initiator
+            .send(SessionCommand::StartTransfer(retry))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("report.txt".to_owned(), 11)]
+        );
+        responder
+            .send(SessionCommand::AcceptTransfer(retry_destination.clone()))
+            .await
+            .unwrap();
+        wait_started(&mut initiator_events).await;
+        wait_started(&mut responder_events).await;
+        wait_finished(&mut initiator_events).await;
+        wait_finished(&mut responder_events).await;
+        assert_eq!(
+            std::fs::read(retry_destination.join("report.txt")).unwrap(),
+            b"report body"
+        );
+
+        responder.stop().await;
+        initiator.stop().await;
+        for root in [
+            source,
+            first_destination,
+            reverse_destination,
+            retry_destination,
+        ] {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// Reads one frame from a raw test peer before the test deadline.
+    async fn raw_frame<S>(connection: &mut FramedConnection<S>) -> Frame
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        timeout(Duration::from_secs(10), connection.read_frame())
+            .await
+            .expect("a frame before the test deadline")
+            .unwrap()
+            .expect("the peer must not close during the test")
+    }
+
+    /// Reads one decoded control from a raw test peer.
+    async fn raw_control<S>(connection: &mut FramedConnection<S>) -> Control
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        let Frame::Control(body) = raw_frame(connection).await else {
+            panic!("expected a control frame");
+        };
+        Control::decode(&body).unwrap()
+    }
+
+    /// Reads one pairing record of the expected step from a raw test peer.
+    async fn raw_pairing_record<S>(
+        connection: &mut FramedConnection<S>,
+        step: PairingStep,
+    ) -> Vec<u8>
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        let Control::Pairing(record) = raw_control(connection).await else {
+            panic!("expected a pairing record");
+        };
+        assert_eq!(record.step, step);
+        record.data
+    }
+
+    /// Completes pairing as a raw initiator so the test can order every later
+    /// frame itself.
+    async fn pair_raw_initiator(
+        handshake: TlsHandshake,
+        responder: &SessionService,
+        responder_events: &mut EventReceiver,
+    ) -> (
+        FramedConnection<tokio_rustls::TlsStream<tokio::net::TcpStream>>,
+        Outbound,
+    ) {
+        let (stream, exporter) = handshake;
+        let (mut connection, outbound) = crate::transport::split_frame_io(stream);
+
+        let hello = Control::Hello(Hello::new(None));
+        let initiator_hello = Bytes::from(hello.encode());
+        outbound.send_control(&hello).await.unwrap();
+        let Frame::Control(responder_hello) = raw_frame(&mut connection).await else {
+            panic!("the responder hello must be a control frame");
+        };
+
+        outbound.send_control(&Control::PairRequest).await.unwrap();
+        assert!(matches!(
+            next_event(responder_events).await,
+            AppEvent::IncomingPairingRequest(_)
+        ));
+        responder.send(SessionCommand::AcceptPairing).await.unwrap();
+        let code = next_code(responder_events).await;
+        assert!(matches!(
+            raw_control(&mut connection).await,
+            Control::PairResponse(response) if response.accepted
+        ));
+
+        let binding =
+            crate::pairing::binding(&exporter[..], &initiator_hello, &responder_hello).unwrap();
+        let mut rng = UnwrapErr(OsRng);
+        let (share, state) = crate::pairing::start_initiator(&code, &binding, &mut rng).unwrap();
+        outbound
+            .send_control(&Control::Pairing(PairingRecord::new(
+                PairingStep::Share,
+                share,
+            )))
+            .await
+            .unwrap();
+        let peer_share = raw_pairing_record(&mut connection, PairingStep::Share).await;
+        let output = crate::pairing::finish_initiator(state, &peer_share).unwrap();
+
+        let tag = crate::pairing::confirmation(&output).unwrap();
+        outbound
+            .send_control_flushed(&Control::Pairing(PairingRecord::new(
+                PairingStep::Confirm,
+                tag.to_vec(),
+            )))
+            .await
+            .unwrap();
+        let peer_tag = raw_pairing_record(&mut connection, PairingStep::Confirm).await;
+        crate::pairing::verify(&output, &peer_tag).unwrap();
+        assert!(matches!(
+            next_event(responder_events).await,
+            AppEvent::PairingSucceeded
+        ));
+
+        (connection, outbound)
+    }
+
+    #[test]
+    fn transfer_response_decisions_follow_the_resulting_phase() {
+        assert!(matches!(
+            response_decision(&Phase::Idle),
+            Some(ResponseDecision::Ended)
+        ));
+        assert!(matches!(
+            response_decision(&Phase::Sending {
+                files: 1,
+                index: 0,
+                started: false,
+                awaiting_result: false,
+            }),
+            Some(ResponseDecision::Accepted)
+        ));
+        // A stale busy consumed by the collision rule leaves the phase
+        // untouched, so the wait must continue instead of accepting.
+        assert!(response_decision(&Phase::AwaitingResponse { files: 1 }).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stale_busy_after_a_withdrawn_proposal_does_not_decide_the_next_one() {
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        // The responder proposes first; the raw peer reads the request but
+        // withholds the busy answer.
+        let queued = FileSelection::for_test(&[("queued.bin", 4)]);
+        responder
+            .send(SessionCommand::StartTransfer(queued.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferRequest(_)
+        ));
+
+        // The raw peer's proposal crosses it: the responder withdraws its own
+        // request and reviews the incoming manifest.
+        outbound
+            .send_control(&Control::TransferRequest(
+                TransferRequest::new(vec![FileEntry {
+                    name: "incoming.bin".to_owned(),
+                    size: 3,
+                }])
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("incoming.bin".to_owned(), 3)]
+        );
+
+        // Reject the review and immediately propose again, before the stale
+        // busy for the withdrawn proposal has been read.
+        responder
+            .send(SessionCommand::RejectTransfer)
+            .await
+            .unwrap();
+        responder
+            .send(SessionCommand::StartTransfer(queued))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferResponse(response) if !response.accepted
+        ));
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferRequest(_)
+        ));
+
+        // The withheld stale busy arrives during the new proposal's wait. It
+        // must not count as that proposal's decision: only the real rejection
+        // that follows may end it.
+        outbound
+            .send_control(&Control::TransferResponse(TransferResponse::rejected(
+                TransferRejection::Busy,
+            )))
+            .await
+            .unwrap();
+        outbound
+            .send_control(&Control::TransferResponse(TransferResponse::rejected(
+                TransferRejection::UserRejected,
+            )))
+            .await
+            .unwrap();
+        timeout(
+            Duration::from_secs(2),
+            next_matching(&mut responder_events, |event| {
+                matches!(event, AppEvent::ProposalRejected)
+            }),
+        )
+        .await
+        .expect("the real rejection must decide the proposal");
+
+        responder.stop().await;
     }
 }

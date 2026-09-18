@@ -9,6 +9,7 @@ use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
 use super::layout::{centered_rect, inset_surface, surface_width};
+use super::presenter::format_size;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, ERROR, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
 
@@ -206,23 +207,6 @@ fn input_display(text: &str) -> String {
         );
     }
     escape_display(text)
-}
-
-/// Formats a byte count with a binary unit.
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 /// Renders one background-filled line inside the review card.

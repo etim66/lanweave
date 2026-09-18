@@ -5,7 +5,7 @@
 
 Lanweave is a terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
-Lanweave is currently a work in progress. The TUI shell, live discovery, the provisional TLS 1.3 connection, and the pairing request and one-time-code authorization flow are available. File transfer and the remaining session features are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
+Lanweave is currently a work in progress. The TUI shell, live discovery, the provisional TLS 1.3 connection, the pairing request and one-time-code authorization flow, and separately approved file transfers in either direction are available. The remaining session lifetime features are being implemented according to the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ Lanweave is currently a work in progress. The TUI shell, live discovery, the pro
 4. If User 2 accepts, their Lanweave app creates and displays a one-time eight-digit code. User 2 shows that code to User 1.
 5. User 1 enters the code. Lanweave checks the code and creates an authenticated, encrypted session between the two devices.
 6. Either user can paste file paths into the TUI, review the files, and select **Send**.
-7. The other user sees a request with the file names, sizes, count, and total size. They can accept or reject it.
+7. The other user sees a request with the file names, sizes, count, and total size, chooses the destination directory, and can accept or reject it.
 8. Accepted files are sent in order. Each file is checked before it is saved under its final name.
 9. After a transfer, either user can request another transfer in the same session.
 10. Either user can close the session. Lanweave also closes it after 10 minutes with no transfer request or active transfer.

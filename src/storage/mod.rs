@@ -43,8 +43,21 @@ pub(crate) enum StorageError {
     NameConflict,
     /// An entry with that name already exists.
     DestinationExists,
+    /// The chosen destination root is missing or not a directory.
+    InvalidDestination,
     /// Preparation, writing, or finalization failed.
     Io,
+}
+
+/// Validates a directory the recipient chose for incoming files.
+///
+/// Choosing the directory is a local user decision, so a symlinked directory
+/// is followed; only the manifest names stay no-follow and no-replace.
+pub(crate) fn validate_destination(path: &Path) -> Result<(), StorageError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        _ => Err(StorageError::InvalidDestination),
+    }
 }
 
 /// Validates one filename component for the destination platform.
@@ -222,7 +235,10 @@ impl TemporaryFile {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Destination, Platform, StorageError, TemporaryFile, name_conflict, validate_name};
+    use super::{
+        Destination, Platform, StorageError, TemporaryFile, name_conflict, validate_destination,
+        validate_name,
+    };
     use crate::protocol::FileEntry;
 
     fn temp_root(tag: &str) -> PathBuf {
@@ -399,6 +415,24 @@ mod tests {
         assert!(name.starts_with(".lanweave-"), "name: {name}");
         assert!(name.ends_with(".part"), "name: {name}");
         drop(file);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn destination_roots_must_be_existing_directories() {
+        let root = temp_root("destination");
+        assert_eq!(validate_destination(&root), Ok(()));
+        assert_eq!(
+            validate_destination(&root.join("missing")),
+            Err(StorageError::InvalidDestination)
+        );
+
+        let file = root.join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            validate_destination(&file),
+            Err(StorageError::InvalidDestination)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
