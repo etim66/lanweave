@@ -1,6 +1,7 @@
 //! User intent and terminal-independent interaction inputs.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use crate::discovery::escape_display;
 use crate::pairing::PairingCode;
@@ -192,7 +193,8 @@ pub(crate) enum UserAction {
     SubmitPairingCode(PairingCode),
     /// Sends the reviewed files in an authorized idle session.
     StartTransfer(FileSelection),
-    AcceptTransfer,
+    /// Accepts the inbound manifest and stores files under the chosen directory.
+    AcceptTransfer(PathBuf),
     RejectTransfer,
     Disconnect,
     Quit,

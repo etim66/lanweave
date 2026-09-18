@@ -1,11 +1,14 @@
 //! Plain application state and messages shared by the event loop and adapters.
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
+use std::path::{Path, PathBuf};
 
 use super::action::{ConnectionTarget, DeviceId, PairingPeer};
 use super::failure::FailureKind;
-use crate::discovery::{Candidate, CandidateStore, DiscoveryEvent};
+use crate::discovery::{Candidate, CandidateStore, DiscoveryEvent, escape_display};
 use crate::pairing::PairingCode;
+use crate::protocol::{FileEntry, TransferRequest};
+use crate::transfer::selection::FileSelection;
 
 /// The authoritative top-level application state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +152,54 @@ impl From<AppState> for Screen {
     }
 }
 
+/// A peer's immutable manifest waiting for the local decision.
+///
+/// The peer display name is untrusted and escaped at construction; it never
+/// proves the peer's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransferProposal {
+    files: Vec<FileEntry>,
+    total_size: u64,
+    peer: Option<String>,
+}
+
+impl TransferProposal {
+    /// Captures the bounded manifest and the untrusted peer name.
+    pub(crate) fn new(request: &TransferRequest, peer: Option<String>) -> Self {
+        Self {
+            files: request.files.clone(),
+            total_size: request.total_size,
+            peer: peer.map(|name| escape_display(&name)),
+        }
+    }
+
+    /// Returns the manifest entries in transfer order.
+    pub(crate) fn files(&self) -> &[FileEntry] {
+        &self.files
+    }
+
+    /// Returns the checked total size of all entries.
+    pub(crate) const fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Returns the escaped, untrusted display name of the requester.
+    pub(crate) fn peer(&self) -> Option<&str> {
+        self.peer.as_deref()
+    }
+}
+
+/// Per-file progress of the active transfer.
+///
+/// `index` is the zero-based manifest index of the file being moved and
+/// `transferred` is the byte count already handled for that file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TransferProgress {
+    pub(crate) index: u16,
+    pub(crate) files: u16,
+    pub(crate) transferred: u64,
+}
+
 /// State owned exclusively by the application event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
@@ -156,16 +207,29 @@ pub struct AppModel {
     candidates: CandidateStore,
     pairing_peer: Option<PairingPeer>,
     pairing_code: Option<PairingCode>,
+    transfer_proposal: Option<TransferProposal>,
+    outbound_selection: Option<FileSelection>,
+    deferred_selection: Option<FileSelection>,
+    transfer_progress: Option<TransferProgress>,
+    default_destination: PathBuf,
 }
 
 impl AppModel {
     /// Creates a model in the starting state with an empty candidate store.
-    pub const fn new() -> Self {
+    ///
+    /// The default destination is the directory Lanweave was started in; the
+    /// recipient can replace it for every inbound transfer.
+    pub fn new() -> Self {
         Self {
             state: AppState::Starting,
             candidates: CandidateStore::new(),
             pairing_peer: None,
             pairing_code: None,
+            transfer_proposal: None,
+            outbound_selection: None,
+            deferred_selection: None,
+            transfer_progress: None,
+            default_destination: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 
@@ -182,6 +246,31 @@ impl AppModel {
     /// Returns the responder's one-time code while it is displayed.
     pub(crate) fn pairing_code(&self) -> Option<&PairingCode> {
         self.pairing_code.as_ref()
+    }
+
+    /// Returns the inbound manifest waiting for the local decision.
+    pub(crate) fn transfer_proposal(&self) -> Option<&TransferProposal> {
+        self.transfer_proposal.as_ref()
+    }
+
+    /// Returns the locally reviewed files of the pending outbound proposal.
+    pub(crate) fn outbound_selection(&self) -> Option<&FileSelection> {
+        self.outbound_selection.as_ref()
+    }
+
+    /// Returns the withdrawn local selection waiting for a later explicit send.
+    pub(crate) fn deferred_selection(&self) -> Option<&FileSelection> {
+        self.deferred_selection.as_ref()
+    }
+
+    /// Returns the progress of the active transfer.
+    pub(crate) fn transfer_progress(&self) -> Option<TransferProgress> {
+        self.transfer_progress
+    }
+
+    /// Returns the directory prefilled for the next inbound transfer.
+    pub(crate) fn default_destination(&self) -> &Path {
+        &self.default_destination
     }
 
     /// Returns the screen the current state should render.
@@ -241,6 +330,53 @@ impl AppModel {
         self.pairing_code = None;
     }
 
+    /// Stores the inbound manifest waiting for the local decision.
+    pub(super) fn set_incoming_proposal(&mut self, proposal: TransferProposal) {
+        self.transfer_proposal = Some(proposal);
+        self.transfer_progress = None;
+    }
+
+    /// Starts a local proposal and stores its reviewed files.
+    ///
+    /// A new explicit send replaces any previously queued selection.
+    pub(super) fn begin_outbound(&mut self, selection: FileSelection) {
+        self.deferred_selection = None;
+        self.outbound_selection = Some(selection);
+        self.transfer_progress = None;
+    }
+
+    /// Moves the pending local selection to the queue.
+    ///
+    /// The files are never sent again without a later explicit send action.
+    pub(super) fn defer_outbound(&mut self) {
+        if let Some(selection) = self.outbound_selection.take() {
+            self.deferred_selection = Some(selection);
+        }
+    }
+
+    /// Updates the active transfer progress.
+    pub(super) fn set_progress(&mut self, progress: TransferProgress) {
+        self.transfer_progress = Some(progress);
+    }
+
+    /// Sets the destination prefilled for the next inbound transfer.
+    pub(super) fn set_default_destination(&mut self, destination: PathBuf) {
+        self.default_destination = destination;
+    }
+
+    /// Clears the finished proposal or transfer, keeping any queued selection.
+    pub(super) fn clear_round(&mut self) {
+        self.transfer_proposal = None;
+        self.outbound_selection = None;
+        self.transfer_progress = None;
+    }
+
+    /// Clears every transfer value once the session is gone.
+    pub(super) fn clear_transfer(&mut self) {
+        self.clear_round();
+        self.deferred_selection = None;
+    }
+
     /// Resolves a discovered device to one route with display context.
     ///
     /// Addresses are already sorted by the candidate store, so the first one
@@ -267,6 +403,11 @@ impl AppModel {
             candidates: CandidateStore::new(),
             pairing_peer: None,
             pairing_code: None,
+            transfer_proposal: None,
+            outbound_selection: None,
+            deferred_selection: None,
+            transfer_progress: None,
+            default_destination: PathBuf::from("."),
         }
     }
 }

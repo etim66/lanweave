@@ -129,7 +129,7 @@ impl AppRuntime {
     /// Applies an action to the UI first, forwarding it to the model when the
     /// UI does not consume it.
     fn apply_user_action(&mut self, action: super::action::UserAction) -> Vec<Effect> {
-        if interaction::apply_user_action(&mut self.ui, action.clone()) {
+        if interaction::apply_user_action(&self.model, &mut self.ui, action.clone()) {
             Vec::new()
         } else {
             update(&mut self.model, AppEvent::User(action))

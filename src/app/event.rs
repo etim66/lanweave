@@ -1,7 +1,10 @@
 //! Runtime inputs and application-requested work.
 
+use std::path::PathBuf;
+
 use super::action::{ConnectionTarget, KeyInput, PairingPeer, UserAction};
 use super::failure::FailureKind;
+use super::model::{TransferProgress, TransferProposal};
 use crate::discovery::DiscoveryEvent;
 use crate::pairing::PairingCode;
 use crate::transfer::selection::FileSelection;
@@ -29,8 +32,11 @@ pub(crate) enum AppEvent {
     PairingCodeIssued(PairingCode),
     PairingSucceeded,
     PairingEnded,
-    IncomingTransferRequest,
+    /// An inbound `transfer_request` is waiting for the local decision.
+    IncomingTransferRequest(TransferProposal),
     TransferStarted,
+    /// Per-file progress of the active transfer.
+    TransferProgress(TransferProgress),
     ProposalRejected,
     TransferFinished,
     SessionClosed,
@@ -47,7 +53,8 @@ pub(crate) enum Effect {
     RejectPairingBusy,
     SubmitPairingCode(PairingCode),
     StartTransfer(FileSelection),
-    AcceptTransfer,
+    /// Accepts the inbound manifest and stores files under the chosen directory.
+    AcceptTransfer(PathBuf),
     RejectTransfer,
     Disconnect,
     Shutdown,

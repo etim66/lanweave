@@ -75,12 +75,14 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
             Some(Effect::SubmitPairingCode(code))
         }
         (AppState::SessionIdle, UserAction::StartTransfer(selection)) => {
+            model.begin_outbound(selection.clone());
             model.transition_to(AppState::OutboundProposal);
             Some(Effect::StartTransfer(selection))
         }
-        (AppState::InboundProposal, UserAction::AcceptTransfer) => {
+        (AppState::InboundProposal, UserAction::AcceptTransfer(destination)) => {
+            model.set_default_destination(destination.clone());
             model.transition_to(AppState::InboundProposalAccepted);
-            Some(Effect::AcceptTransfer)
+            Some(Effect::AcceptTransfer(destination))
         }
         (AppState::InboundProposal, UserAction::RejectTransfer) => {
             model.transition_to(AppState::SessionIdle);
@@ -140,7 +142,17 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.transition_to(AppState::Browsing);
             None
         }
-        (AppState::SessionIdle, AppEvent::IncomingTransferRequest) => {
+        (AppState::SessionIdle, AppEvent::IncomingTransferRequest(proposal)) => {
+            model.set_incoming_proposal(proposal);
+            model.transition_to(AppState::InboundProposal);
+            None
+        }
+        // The initiator-priority collision rule: the responder withdraws its
+        // own proposal and reviews the initiator's. The local files stay
+        // queued for a later explicit send.
+        (AppState::OutboundProposal, AppEvent::IncomingTransferRequest(proposal)) => {
+            model.defer_outbound();
+            model.set_incoming_proposal(proposal);
             model.transition_to(AppState::InboundProposal);
             None
         }
@@ -149,10 +161,17 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             None
         }
         (AppState::OutboundProposal, AppEvent::ProposalRejected) => {
+            model.defer_outbound();
+            model.clear_round();
             model.transition_to(AppState::SessionIdle);
             None
         }
+        (state, AppEvent::TransferProgress(progress)) if state.is_transfer_active() => {
+            model.set_progress(progress);
+            None
+        }
         (state, AppEvent::TransferFinished) if state.is_transfer_active() => {
+            model.clear_round();
             model.transition_to(AppState::SessionIdle);
             None
         }
@@ -160,7 +179,11 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.transition_to(AppState::TransferringInbound);
             None
         }
-        (AppState::InboundProposalAccepted, AppEvent::ProposalRejected) => {
+        (
+            AppState::InboundProposal | AppState::InboundProposalAccepted,
+            AppEvent::ProposalRejected,
+        ) => {
+            model.clear_round();
             model.transition_to(AppState::SessionIdle);
             None
         }
@@ -172,11 +195,13 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
         }
         (state, AppEvent::SessionClosed) if state.is_pairing() || state.has_session() => {
             model.clear_pairing();
+            model.clear_transfer();
             model.transition_to(AppState::Browsing);
             None
         }
         (state, AppEvent::Failed(kind)) if !matches!(state, AppState::Error(_)) => {
             model.clear_pairing();
+            model.clear_transfer();
             model.transition_to(AppState::Error(kind));
             None
         }
@@ -206,12 +231,30 @@ mod tests {
     use crate::app::action::{ConnectionTarget, DeviceId, DirectEndpoint, PairingPeer, UserAction};
     use crate::app::event::{AppEvent, Effect};
     use crate::app::failure::FailureKind;
-    use crate::app::model::{AppModel, AppState};
+    use crate::app::model::{AppModel, AppState, TransferProposal};
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
+    use crate::protocol::{FileEntry, TransferRequest};
     use crate::transfer::selection::FileSelection;
 
     const DEVICE: DeviceId = DeviceId::new(7);
+
+    /// A local destination directory for accept actions.
+    fn destination() -> std::path::PathBuf {
+        std::path::PathBuf::from("/incoming")
+    }
+
+    /// A bounded inbound manifest for transfer events.
+    fn proposal() -> TransferProposal {
+        TransferProposal::new(
+            &TransferRequest::new(vec![FileEntry {
+                name: "report.txt".to_owned(),
+                size: 64,
+            }])
+            .unwrap(),
+            Some("peer".to_owned()),
+        )
+    }
 
     fn peer() -> PairingPeer {
         PairingPeer::new(Some("peer".to_owned()), "127.0.0.1:4242".to_owned())
@@ -314,7 +357,7 @@ mod tests {
             ),
             (
                 AppState::SessionIdle,
-                AppEvent::IncomingTransferRequest,
+                AppEvent::IncomingTransferRequest(proposal()),
                 AppState::InboundProposal,
                 None,
             ),
@@ -332,9 +375,9 @@ mod tests {
             ),
             (
                 AppState::InboundProposal,
-                AppEvent::User(UserAction::AcceptTransfer),
+                AppEvent::User(UserAction::AcceptTransfer(destination())),
                 AppState::InboundProposalAccepted,
-                Some(Effect::AcceptTransfer),
+                Some(Effect::AcceptTransfer(destination())),
             ),
             (
                 AppState::InboundProposalAccepted,
@@ -484,7 +527,10 @@ mod tests {
                 UserAction::SubmitPairingCode(code("12345678")),
                 AppState::PairingOutboundAccepted,
             ),
-            (UserAction::AcceptTransfer, AppState::InboundProposal),
+            (
+                UserAction::AcceptTransfer(destination()),
+                AppState::InboundProposal,
+            ),
             (UserAction::RejectTransfer, AppState::InboundProposal),
         ];
 
@@ -657,7 +703,7 @@ mod tests {
             AppEvent::PairingAccepted,
             AppEvent::PairingCodeIssued(code("12345678")),
             AppEvent::PairingSucceeded,
-            AppEvent::IncomingTransferRequest,
+            AppEvent::IncomingTransferRequest(proposal()),
             AppEvent::TransferStarted,
             AppEvent::TransferFinished,
             AppEvent::SessionClosed,
@@ -741,5 +787,58 @@ mod tests {
             AppState::Error(FailureKind::Internal),
             AppState::ShuttingDown,
         ]
+    }
+
+    #[test]
+    fn a_withdrawn_local_proposal_stays_queued_for_an_explicit_send() {
+        let selection = FileSelection::for_test(&[("report.txt", 64)]);
+        let mut model = model_in(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        assert_eq!(model.state(), AppState::OutboundProposal);
+
+        // The initiator-priority collision moves the local files to the queue
+        // while the peer's request is reviewed.
+        update(&mut model, AppEvent::IncomingTransferRequest(proposal()));
+        assert_eq!(model.state(), AppState::InboundProposal);
+        assert_eq!(model.deferred_selection(), Some(&selection));
+        assert!(model.outbound_selection().is_none());
+        assert!(model.transfer_proposal().is_some());
+
+        // Ending the peer's proposal returns to idle with the files still queued.
+        update(&mut model, AppEvent::ProposalRejected);
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert_eq!(model.deferred_selection(), Some(&selection));
+
+        // A new explicit send moves the queued files back into the proposal.
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        assert_eq!(model.state(), AppState::OutboundProposal);
+        assert!(model.deferred_selection().is_none());
+        assert_eq!(model.outbound_selection(), Some(&selection));
+    }
+
+    #[test]
+    fn progress_is_tracked_only_while_a_transfer_runs() {
+        let mut model = model_in(AppState::SessionIdle);
+        let progress = crate::app::model::TransferProgress {
+            index: 1,
+            files: 3,
+            transferred: 128,
+        };
+
+        assert!(update(&mut model, AppEvent::TransferProgress(progress)).is_empty());
+        assert!(model.transfer_progress().is_none());
+
+        let mut model = model_in(AppState::TransferringOutbound);
+        update(&mut model, AppEvent::TransferProgress(progress));
+        assert_eq!(model.transfer_progress(), Some(progress));
+        update(&mut model, AppEvent::TransferFinished);
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.transfer_progress().is_none());
     }
 }

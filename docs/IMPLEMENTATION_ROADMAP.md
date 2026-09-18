@@ -67,7 +67,7 @@ Exit criteria:
 - Unsafe or existing names never overwrite a destination.
 - A later-file failure keeps the verified prefix and removes the current partial.
 
-Status: the local half is implemented. `transfer::selection` parses, validates, and reduces pasted paths to a names-and-sizes manifest; `storage` validates destination names and manages restrictive no-replace partial files; and `transfer::engine` streams bounded chunks with SHA-256 verification and fail-fast prefix retention. The session owner connects the engine to `transfer_request` and `DATA` frames in the next gate.
+Status: implemented. `transfer::selection` parses, validates, and reduces pasted paths to a names-and-sizes manifest; `storage` validates destination names and manages restrictive no-replace partial files; `transfer::engine` streams bounded chunks with SHA-256 verification and fail-fast prefix retention; and the session owner runs the separately approved `transfer_request`, `ready`, `DATA`, `file_end`, and `file_result` exchange over the authorized connection. The recipient chooses the destination directory in the review prompt.
 
 ## Gate 6: Reusable Sessions
 
@@ -79,6 +79,8 @@ Exit criteria:
 - Rejection before `ready` keeps the session usable; active-transfer failure cleans up and closes it.
 - Manual close and 600-second idle close work from both peers.
 - A new connection always requires fresh pairing.
+
+Status: same-session repeated and reverse transfers, pre-`ready` rejection, active-transfer cleanup and close, and the fixed initiator-priority simultaneous-request rule are implemented. The explicit `session_close` message and the 600-second idle deadline remain to be wired in.
 
 ## Gate 7: Hardening And Release
 

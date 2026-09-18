@@ -42,7 +42,7 @@ Before acceptance, the recipient rejects the request if any name:
 - is equal or platform-equivalent to another requested name; or
 - matches an existing destination entry.
 
-After user approval and before sending acceptance, the recipient selects the destination and prepares a temporary file for the first item. The version 1 MVP uses the directory where Lanweave was started; the peer never influences the destination. Temporary names are unpredictable, created without following links, and use restrictive permissions. Failure during preparation sends a rejection.
+After user approval and before sending acceptance, the recipient selects the destination and prepares a temporary file for the first item. The review prompt lets the recipient choose any existing directory; it is prefilled with the directory where Lanweave was started or the last destination they accepted. The peer never influences or learns the destination. Temporary names are unpredictable, created without following links, and use restrictive permissions. Failure during preparation sends a rejection.
 
 Lanweave never overwrites or silently renames a destination. Finalization uses a safe no-replace operation. If that cannot be guaranteed, the file fails.
 

@@ -1,6 +1,7 @@
 //! Terminal-independent interaction state and key handling.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use super::action::{
     DirectAddressError, DirectEndpoint, KeyInput, MAX_DIRECT_ADDRESS_CHARS, UserAction,
@@ -11,7 +12,11 @@ use super::command_palette::{
 use super::model::{AppModel, AppState};
 use crate::discovery::truncate_utf8;
 use crate::pairing::{CODE_DIGITS, PairingCode};
+use crate::storage::validate_destination;
 use crate::transfer::selection::{FileSelection, MAX_SELECTION_INPUT_BYTES, SelectionIssue};
+
+/// Maximum size in bytes of the destination path input.
+pub(crate) const MAX_DESTINATION_INPUT_BYTES: usize = 4_096;
 
 /// Live query and selection for the open command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +106,7 @@ pub(crate) enum Overlay {
     DirectAddress(DirectAddressInput),
     PairingCode(PairingCodeInput),
     FileSelection(FileSelectionInput),
+    TransferReview(TransferReviewInput),
     Help,
 }
 
@@ -115,6 +121,25 @@ pub(crate) struct FileSelectionInput {
     pub(crate) issues: Vec<SelectionIssue>,
     /// Highlighted entry for removal.
     pub(crate) selected: Option<usize>,
+}
+
+/// Live inbound transfer review: the chosen destination and its validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransferReviewInput {
+    /// Directory typed by the recipient; prefilled with the default.
+    pub(crate) destination: String,
+    /// Why the current destination cannot be accepted.
+    pub(crate) error: Option<&'static str>,
+}
+
+impl TransferReviewInput {
+    /// Creates a review prefilled with the default destination.
+    fn new(destination: PathBuf) -> Self {
+        Self {
+            destination: destination.to_string_lossy().into_owned(),
+            error: None,
+        }
+    }
 }
 
 /// Terminal-independent UI state that the view renders.
@@ -277,6 +302,34 @@ pub(crate) fn apply_key_input(
             ui.overlay = Some(Overlay::FileSelection(files));
             None
         }
+        Some(Overlay::TransferReview(mut review)) => {
+            match input {
+                KeyInput::Character(character) => {
+                    if review.destination.len() + character.len_utf8()
+                        <= MAX_DESTINATION_INPUT_BYTES
+                    {
+                        review.destination.push(character);
+                        review.error = None;
+                    }
+                }
+                KeyInput::Backspace => {
+                    review.destination.pop();
+                    review.error = None;
+                }
+                KeyInput::Enter => match validate_destination(Path::new(&review.destination)) {
+                    Ok(()) => {
+                        return Some(UserAction::AcceptTransfer(PathBuf::from(
+                            &review.destination,
+                        )));
+                    }
+                    Err(_) => review.error = Some("Enter an existing directory"),
+                },
+                KeyInput::Escape => return Some(UserAction::RejectTransfer),
+                _ => {}
+            }
+            ui.overlay = Some(Overlay::TransferReview(review));
+            None
+        }
         Some(Overlay::Help) => match input {
             KeyInput::Escape => None,
             KeyInput::Character('/') => {
@@ -318,17 +371,26 @@ pub(crate) fn apply_key_input(
     }
 }
 
-/// Appends pasted text to the open file review, bounded by the input limit.
+/// Appends pasted text to the open path input, bounded by the input limit.
 ///
-/// Paste is accepted only where a reviewed path buffer is open; other screens
-/// ignore it.
+/// Paste is accepted only where a reviewed path or destination buffer is open;
+/// other screens ignore it.
 pub(crate) fn apply_paste(ui: &mut UiState, text: &str) {
-    let Some(Overlay::FileSelection(files)) = ui.overlay.as_mut() else {
-        return;
-    };
-    let remaining = MAX_SELECTION_INPUT_BYTES.saturating_sub(files.text.len());
-    if remaining > 0 {
-        files.text.push_str(&truncate_utf8(text, remaining));
+    match ui.overlay.as_mut() {
+        Some(Overlay::FileSelection(files)) => {
+            let remaining = MAX_SELECTION_INPUT_BYTES.saturating_sub(files.text.len());
+            if remaining > 0 {
+                files.text.push_str(&truncate_utf8(text, remaining));
+            }
+        }
+        Some(Overlay::TransferReview(review)) => {
+            let remaining = MAX_DESTINATION_INPUT_BYTES.saturating_sub(review.destination.len());
+            if remaining > 0 {
+                review.destination.push_str(&truncate_utf8(text, remaining));
+                review.error = None;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -336,7 +398,7 @@ pub(crate) fn apply_paste(ui: &mut UiState, text: &str) {
 ///
 /// Returns `true` when the action changed the UI and `false` when it must be
 /// forwarded to the application model instead.
-pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
+pub(crate) fn apply_user_action(model: &AppModel, ui: &mut UiState, action: UserAction) -> bool {
     match action {
         UserAction::ShowHelp => {
             ui.overlay = Some(Overlay::Help);
@@ -351,7 +413,13 @@ pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
             true
         }
         UserAction::OpenFileSelection => {
-            ui.overlay = Some(Overlay::FileSelection(FileSelectionInput::default()));
+            // A selection withdrawn by a simultaneous proposal or a rejection
+            // is restored so it can be sent again explicitly.
+            let selection = model.deferred_selection().cloned().unwrap_or_default();
+            ui.overlay = Some(Overlay::FileSelection(FileSelectionInput {
+                selection,
+                ..FileSelectionInput::default()
+            }));
             true
         }
         _ => false,
@@ -363,7 +431,8 @@ pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
 /// The palette selection is kept on the first still-visible command, and a
 /// device selection is cleared when its device disappeared from discovery.
 /// The initiator's code input opens when the request is accepted and closes
-/// as soon as the flow leaves that state.
+/// as soon as the flow leaves that state; the inbound transfer review opens on
+/// every proposal and closes as soon as it is decided or withdrawn.
 pub(crate) fn reconcile(model: &AppModel, ui: &mut UiState) {
     if let Some(Overlay::CommandPalette(palette)) = ui.overlay.as_mut() {
         palette.selected =
@@ -375,6 +444,18 @@ pub(crate) fn reconcile(model: &AppModel, ui: &mut UiState) {
             ui.overlay = Some(Overlay::PairingCode(PairingCodeInput::new()));
         }
     } else if matches!(ui.overlay, Some(Overlay::PairingCode(_))) {
+        ui.overlay = None;
+    }
+
+    // The inbound review is a required prompt: it replaces any other overlay
+    // and keeps the recipient's destination edits until the proposal ends.
+    if model.state() == AppState::InboundProposal {
+        if !matches!(ui.overlay, Some(Overlay::TransferReview(_))) {
+            ui.overlay = Some(Overlay::TransferReview(TransferReviewInput::new(
+                model.default_destination().to_path_buf(),
+            )));
+        }
+    } else if matches!(ui.overlay, Some(Overlay::TransferReview(_))) {
         ui.overlay = None;
     }
 
@@ -476,12 +557,30 @@ fn open_palette(model: &AppModel, ui: &mut UiState) {
 mod tests {
     use tokio::time::Instant;
 
-    use super::{Overlay, UiState, apply_key_input, apply_paste, apply_user_action, reconcile};
+    use super::{
+        MAX_DESTINATION_INPUT_BYTES, Overlay, UiState, apply_key_input, apply_paste,
+        apply_user_action, reconcile,
+    };
     use crate::app::action::{DirectAddressError, DirectEndpoint, KeyInput, UserAction};
+    use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
-    use crate::app::model::{AppModel, AppState};
+    use crate::app::model::{AppModel, AppState, TransferProposal};
+    use crate::app::reducer::update;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
-    use crate::transfer::selection::MAX_SELECTION_INPUT_BYTES;
+    use crate::protocol::{FileEntry, TransferRequest};
+    use crate::transfer::selection::{FileSelection, MAX_SELECTION_INPUT_BYTES};
+
+    /// A bounded inbound manifest for interaction tests.
+    fn proposal() -> TransferProposal {
+        TransferProposal::new(
+            &TransferRequest::new(vec![FileEntry {
+                name: "report.txt".to_owned(),
+                size: 64,
+            }])
+            .unwrap(),
+            Some("peer".to_owned()),
+        )
+    }
 
     fn browsing_with(names: &[&str]) -> AppModel {
         let mut model = AppModel::for_test(AppState::Browsing);
@@ -552,24 +651,34 @@ mod tests {
 
     #[test]
     fn help_and_devices_only_change_ui_state() {
+        let model = AppModel::for_test(AppState::Browsing);
         let mut ui = UiState::default();
-        assert!(apply_user_action(&mut ui, UserAction::ShowHelp));
+        assert!(apply_user_action(&model, &mut ui, UserAction::ShowHelp));
         assert_eq!(ui.overlay(), Some(&Overlay::Help));
-        assert!(apply_user_action(&mut ui, UserAction::ShowDevices));
+        assert!(apply_user_action(&model, &mut ui, UserAction::ShowDevices));
         assert_eq!(ui.overlay(), None);
-        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert!(apply_user_action(
+            &model,
+            &mut ui,
+            UserAction::OpenFileSelection
+        ));
         assert!(matches!(ui.overlay(), Some(Overlay::FileSelection(_))));
-        assert!(!apply_user_action(&mut ui, UserAction::Quit));
+        assert!(!apply_user_action(&model, &mut ui, UserAction::Quit));
     }
 
     #[test]
     fn paste_is_bounded_and_only_reaches_the_review_input() {
+        let model = AppModel::for_test(AppState::Browsing);
         let mut ui = UiState::default();
 
         apply_paste(&mut ui, "ignored");
         assert_eq!(ui.overlay(), None);
 
-        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert!(apply_user_action(
+            &model,
+            &mut ui,
+            UserAction::OpenFileSelection
+        ));
         apply_paste(&mut ui, &"x".repeat(MAX_SELECTION_INPUT_BYTES + 10));
         let Some(Overlay::FileSelection(files)) = ui.overlay() else {
             panic!("the review overlay should remain open");
@@ -587,8 +696,11 @@ mod tests {
         std::fs::write(&second, b"two").unwrap();
 
         let mut ui = UiState::default();
-        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
-
+        assert!(apply_user_action(
+            &AppModel::for_test(AppState::Browsing),
+            &mut ui,
+            UserAction::OpenFileSelection
+        ));
         // An empty review cannot send, even in an idle session.
         let session = AppModel::for_test(AppState::SessionIdle);
         assert_eq!(apply_key_input(&session, &mut ui, KeyInput::Enter), None);
@@ -623,7 +735,11 @@ mod tests {
         assert_eq!(ui.overlay(), None);
 
         // Escape closes the review without sending.
-        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert!(apply_user_action(
+            &session,
+            &mut ui,
+            UserAction::OpenFileSelection
+        ));
         assert_eq!(apply_key_input(&session, &mut ui, KeyInput::Escape), None);
         assert_eq!(ui.overlay(), None);
         let _ = std::fs::remove_dir_all(&root);
@@ -632,7 +748,11 @@ mod tests {
     #[test]
     fn review_overlay_closes_when_the_state_cannot_host_it() {
         let mut ui = UiState::default();
-        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert!(apply_user_action(
+            &AppModel::for_test(AppState::Browsing),
+            &mut ui,
+            UserAction::OpenFileSelection
+        ));
         assert!(matches!(ui.overlay(), Some(Overlay::FileSelection(_))));
 
         let pairing = AppModel::for_test(AppState::PairingInbound);
@@ -743,7 +863,11 @@ mod tests {
     fn direct_address_input_bounds_validates_and_dispatches() {
         let model = browsing_with(&[]);
         let mut ui = UiState::default();
-        assert!(apply_user_action(&mut ui, UserAction::OpenDirectAddress));
+        assert!(apply_user_action(
+            &model,
+            &mut ui,
+            UserAction::OpenDirectAddress
+        ));
 
         // Input is bounded.
         for _ in 0..super::MAX_DIRECT_ADDRESS_CHARS + 20 {
@@ -799,7 +923,7 @@ mod tests {
         assert_eq!(ui.overlay(), None);
 
         // Escape closes the overlay without dispatching.
-        apply_user_action(&mut ui, UserAction::OpenDirectAddress);
+        apply_user_action(&model, &mut ui, UserAction::OpenDirectAddress);
         assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Escape), None);
         assert_eq!(ui.overlay(), None);
     }
@@ -870,5 +994,89 @@ mod tests {
         let confirming = AppModel::for_test(AppState::PairingConfirming);
         reconcile(&confirming, &mut ui);
         assert_eq!(ui.overlay(), None);
+    }
+
+    #[test]
+    fn inbound_review_prefills_and_requires_a_real_destination() {
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(&mut model, AppEvent::IncomingTransferRequest(proposal()));
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        let Some(Overlay::TransferReview(review)) = ui.overlay() else {
+            panic!("the inbound review must open with the proposal");
+        };
+        assert_eq!(review.destination, ".");
+        assert_eq!(review.error, None);
+
+        // A missing directory reports an error and never dispatches.
+        let missing =
+            std::env::temp_dir().join(format!("lanweave-missing-{:016x}", fastrand::u64(..)));
+        let Some(Overlay::TransferReview(review)) = ui.overlay.as_mut() else {
+            panic!("the inbound review must remain open");
+        };
+        review.destination = missing.display().to_string();
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Enter), None);
+        let Some(Overlay::TransferReview(review)) = ui.overlay() else {
+            panic!("the inbound review must remain open");
+        };
+        assert!(review.error.is_some());
+
+        // An existing directory dispatches the chosen destination.
+        let root = std::env::temp_dir().join(format!("lanweave-review-{:016x}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let Some(Overlay::TransferReview(review)) = ui.overlay.as_mut() else {
+            panic!("the inbound review must remain open");
+        };
+        review.destination = root.display().to_string();
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::AcceptTransfer(root.clone()))
+        );
+        assert_eq!(ui.overlay(), None);
+
+        // Escape rejects the proposal and closes the card.
+        reconcile(&model, &mut ui);
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Escape),
+            Some(UserAction::RejectTransfer)
+        );
+        assert_eq!(ui.overlay(), None);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // The byte bound rejects a multi-byte character that would overflow it.
+        reconcile(&model, &mut ui);
+        for _ in 0..MAX_DESTINATION_INPUT_BYTES {
+            apply_key_input(&model, &mut ui, KeyInput::Character('a'));
+        }
+        apply_key_input(&model, &mut ui, KeyInput::Character('é'));
+        let Some(Overlay::TransferReview(review)) = ui.overlay() else {
+            panic!("the inbound review must remain open");
+        };
+        assert_eq!(review.destination.len(), MAX_DESTINATION_INPUT_BYTES);
+    }
+
+    #[test]
+    fn send_review_restores_a_deferred_selection() {
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        let selection = FileSelection::for_test(&[("report.txt", 7)]);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        update(&mut model, AppEvent::IncomingTransferRequest(proposal()));
+        update(&mut model, AppEvent::ProposalRejected);
+        assert_eq!(model.state(), AppState::SessionIdle);
+
+        let mut ui = UiState::default();
+        assert!(apply_user_action(
+            &model,
+            &mut ui,
+            UserAction::OpenFileSelection
+        ));
+        let Some(Overlay::FileSelection(files)) = ui.overlay() else {
+            panic!("the review overlay should open");
+        };
+        assert_eq!(files.selection, selection);
     }
 }
