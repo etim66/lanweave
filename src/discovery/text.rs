@@ -27,7 +27,7 @@ pub(crate) fn escape_display(input: &str) -> String {
 }
 
 /// Truncates `input` to at most `max_bytes` without splitting a character.
-pub(super) fn truncate_utf8(input: &str, max_bytes: usize) -> String {
+pub(crate) fn truncate_utf8(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_owned();
     }

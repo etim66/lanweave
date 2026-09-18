@@ -9,7 +9,9 @@ use super::command_palette::{
     CommandId, MAX_COMMAND_QUERY_CHARS, first_visible, move_selection, reconcile_selection, resolve,
 };
 use super::model::{AppModel, AppState};
+use crate::discovery::truncate_utf8;
 use crate::pairing::{CODE_DIGITS, PairingCode};
+use crate::transfer::selection::{FileSelection, MAX_SELECTION_INPUT_BYTES, SelectionIssue};
 
 /// Live query and selection for the open command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +100,21 @@ pub(crate) enum Overlay {
     CommandPalette(CommandPalette),
     DirectAddress(DirectAddressInput),
     PairingCode(PairingCodeInput),
+    FileSelection(FileSelectionInput),
     Help,
+}
+
+/// Live local file review: pending text, reviewed files, issues, and cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FileSelectionInput {
+    /// Pasted or typed paths awaiting review.
+    pub(crate) text: String,
+    /// Files already validated and reviewed.
+    pub(crate) selection: FileSelection,
+    /// Rejections from the last review pass.
+    pub(crate) issues: Vec<SelectionIssue>,
+    /// Highlighted entry for removal.
+    pub(crate) selected: Option<usize>,
 }
 
 /// Terminal-independent UI state that the view renders.
@@ -112,6 +128,15 @@ impl UiState {
     /// Returns the active overlay, if any.
     pub(crate) const fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
+    }
+
+    /// Builds UI state around one overlay for rendering tests.
+    #[cfg(test)]
+    pub(crate) const fn for_test(overlay: Overlay) -> Self {
+        Self {
+            overlay: Some(overlay),
+            device_selection: None,
+        }
     }
 
     /// Returns the currently selected device in the browsing list.
@@ -214,6 +239,44 @@ pub(crate) fn apply_key_input(
             ui.overlay = Some(Overlay::PairingCode(code_input));
             None
         }
+        Some(Overlay::FileSelection(mut files)) => {
+            match input {
+                KeyInput::Character(character) => {
+                    if files.text.len() < MAX_SELECTION_INPUT_BYTES {
+                        files.text.push(character);
+                    }
+                }
+                KeyInput::Backspace => {
+                    if files.text.pop().is_none() {
+                        remove_selected_file(&mut files);
+                    }
+                }
+                KeyInput::Enter => {
+                    if files.text.is_empty() {
+                        // An empty input sends the reviewed selection when the
+                        // session is authorized and idle.
+                        if model.capabilities().can_start_transfer
+                            && files.selection.request().is_some()
+                        {
+                            return Some(UserAction::StartTransfer(std::mem::take(
+                                &mut files.selection,
+                            )));
+                        }
+                    } else {
+                        files.issues = files.selection.add_text(&files.text);
+                        files.text.clear();
+                        if files.selected.is_none() && !files.selection.is_empty() {
+                            files.selected = Some(0);
+                        }
+                    }
+                }
+                KeyInput::Up => move_file_selection(&mut files, false),
+                KeyInput::Down => move_file_selection(&mut files, true),
+                KeyInput::Escape => return None,
+            }
+            ui.overlay = Some(Overlay::FileSelection(files));
+            None
+        }
         Some(Overlay::Help) => match input {
             KeyInput::Escape => None,
             KeyInput::Character('/') => {
@@ -255,6 +318,20 @@ pub(crate) fn apply_key_input(
     }
 }
 
+/// Appends pasted text to the open file review, bounded by the input limit.
+///
+/// Paste is accepted only where a reviewed path buffer is open; other screens
+/// ignore it.
+pub(crate) fn apply_paste(ui: &mut UiState, text: &str) {
+    let Some(Overlay::FileSelection(files)) = ui.overlay.as_mut() else {
+        return;
+    };
+    let remaining = MAX_SELECTION_INPUT_BYTES.saturating_sub(files.text.len());
+    if remaining > 0 {
+        files.text.push_str(&truncate_utf8(text, remaining));
+    }
+}
+
 /// Applies an already resolved action to the UI state.
 ///
 /// Returns `true` when the action changed the UI and `false` when it must be
@@ -271,6 +348,10 @@ pub(crate) fn apply_user_action(ui: &mut UiState, action: UserAction) -> bool {
         }
         UserAction::OpenDirectAddress => {
             ui.overlay = Some(Overlay::DirectAddress(DirectAddressInput::new()));
+            true
+        }
+        UserAction::OpenFileSelection => {
+            ui.overlay = Some(Overlay::FileSelection(FileSelectionInput::default()));
             true
         }
         _ => false,
@@ -294,6 +375,14 @@ pub(crate) fn reconcile(model: &AppModel, ui: &mut UiState) {
             ui.overlay = Some(Overlay::PairingCode(PairingCodeInput::new()));
         }
     } else if matches!(ui.overlay, Some(Overlay::PairingCode(_))) {
+        ui.overlay = None;
+    }
+
+    // The review list is local, but it must never hide a required prompt or a
+    // running transfer.
+    if matches!(ui.overlay, Some(Overlay::FileSelection(_)))
+        && !model.capabilities().can_review_files
+    {
         ui.overlay = None;
     }
 
@@ -348,6 +437,34 @@ fn resolve_selected_device(model: &AppModel, ui: &mut UiState) -> Option<UserAct
     }
 }
 
+/// Moves the review selection by one entry, wrapping at the ends.
+fn move_file_selection(files: &mut FileSelectionInput, forward: bool) {
+    let count = files.selection.len();
+    if count == 0 {
+        files.selected = None;
+        return;
+    }
+
+    let next = match (files.selected, forward) {
+        (Some(index), true) => (index + 1) % count,
+        (Some(0), false) | (None, false) => count - 1,
+        (None, true) => 0,
+        (Some(index), false) => index - 1,
+    };
+    files.selected = Some(next);
+}
+
+/// Removes the highlighted review entry and keeps the cursor valid.
+fn remove_selected_file(files: &mut FileSelectionInput) {
+    let Some(index) = files.selected else {
+        return;
+    };
+    if files.selection.remove(index) {
+        let remaining = files.selection.len();
+        files.selected = (remaining > 0).then(|| index.min(remaining - 1));
+    }
+}
+
 /// Opens the command palette with an empty query and the first command selected.
 fn open_palette(model: &AppModel, ui: &mut UiState) {
     let query = String::new();
@@ -359,11 +476,12 @@ fn open_palette(model: &AppModel, ui: &mut UiState) {
 mod tests {
     use tokio::time::Instant;
 
-    use super::{Overlay, UiState, apply_key_input, apply_user_action, reconcile};
+    use super::{Overlay, UiState, apply_key_input, apply_paste, apply_user_action, reconcile};
     use crate::app::action::{DirectAddressError, DirectEndpoint, KeyInput, UserAction};
     use crate::app::failure::FailureKind;
     use crate::app::model::{AppModel, AppState};
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
+    use crate::transfer::selection::MAX_SELECTION_INPUT_BYTES;
 
     fn browsing_with(names: &[&str]) -> AppModel {
         let mut model = AppModel::for_test(AppState::Browsing);
@@ -418,7 +536,7 @@ mod tests {
         }
         assert_eq!(
             apply_key_input(&session, &mut ui, KeyInput::Enter),
-            Some(UserAction::StartTransfer)
+            Some(UserAction::OpenFileSelection)
         );
         assert_eq!(ui.overlay(), None);
 
@@ -439,7 +557,87 @@ mod tests {
         assert_eq!(ui.overlay(), Some(&Overlay::Help));
         assert!(apply_user_action(&mut ui, UserAction::ShowDevices));
         assert_eq!(ui.overlay(), None);
+        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert!(matches!(ui.overlay(), Some(Overlay::FileSelection(_))));
         assert!(!apply_user_action(&mut ui, UserAction::Quit));
+    }
+
+    #[test]
+    fn paste_is_bounded_and_only_reaches_the_review_input() {
+        let mut ui = UiState::default();
+
+        apply_paste(&mut ui, "ignored");
+        assert_eq!(ui.overlay(), None);
+
+        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        apply_paste(&mut ui, &"x".repeat(MAX_SELECTION_INPUT_BYTES + 10));
+        let Some(Overlay::FileSelection(files)) = ui.overlay() else {
+            panic!("the review overlay should remain open");
+        };
+        assert_eq!(files.text.len(), MAX_SELECTION_INPUT_BYTES);
+    }
+
+    #[test]
+    fn file_review_adds_removes_and_gates_send() {
+        let root = std::env::temp_dir().join(format!("lanweave-review-{:016x}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+
+        let mut ui = UiState::default();
+        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+
+        // An empty review cannot send, even in an idle session.
+        let session = AppModel::for_test(AppState::SessionIdle);
+        assert_eq!(apply_key_input(&session, &mut ui, KeyInput::Enter), None);
+
+        apply_paste(
+            &mut ui,
+            &format!("{}\n{}\n", first.display(), second.display()),
+        );
+
+        // Enter reviews the pasted paths; browsing cannot send them yet.
+        let browsing = AppModel::for_test(AppState::Browsing);
+        assert_eq!(apply_key_input(&browsing, &mut ui, KeyInput::Enter), None);
+        let Some(Overlay::FileSelection(files)) = ui.overlay() else {
+            panic!("the review overlay should remain open");
+        };
+        assert_eq!(files.selection.len(), 2);
+        assert_eq!(apply_key_input(&browsing, &mut ui, KeyInput::Enter), None);
+
+        // Down and backspace remove the highlighted entry.
+        assert_eq!(apply_key_input(&browsing, &mut ui, KeyInput::Down), None);
+        apply_key_input(&browsing, &mut ui, KeyInput::Backspace);
+        let Some(Overlay::FileSelection(files)) = ui.overlay() else {
+            panic!("the review overlay should remain open");
+        };
+        assert_eq!(files.selection.len(), 1);
+
+        // An authorized idle session sends the remaining reviewed file.
+        assert!(matches!(
+            apply_key_input(&session, &mut ui, KeyInput::Enter),
+            Some(UserAction::StartTransfer(_))
+        ));
+        assert_eq!(ui.overlay(), None);
+
+        // Escape closes the review without sending.
+        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert_eq!(apply_key_input(&session, &mut ui, KeyInput::Escape), None);
+        assert_eq!(ui.overlay(), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn review_overlay_closes_when_the_state_cannot_host_it() {
+        let mut ui = UiState::default();
+        assert!(apply_user_action(&mut ui, UserAction::OpenFileSelection));
+        assert!(matches!(ui.overlay(), Some(Overlay::FileSelection(_))));
+
+        let pairing = AppModel::for_test(AppState::PairingInbound);
+        reconcile(&pairing, &mut ui);
+        assert_eq!(ui.overlay(), None);
     }
 
     #[test]

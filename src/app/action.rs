@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use crate::discovery::escape_display;
 use crate::pairing::PairingCode;
+use crate::transfer::selection::FileSelection;
 
 /// Maximum length of a host portion in a [`DirectEndpoint`].
 pub(crate) const MAX_DIRECT_HOST_BYTES: usize = 255;
@@ -184,10 +185,13 @@ pub(crate) enum UserAction {
     SelectDevice(DeviceId),
     ConnectDirect(DirectEndpoint),
     OpenDirectAddress,
+    /// Opens the local file review list.
+    OpenFileSelection,
     AcceptPairing,
     RejectPairing,
     SubmitPairingCode(PairingCode),
-    StartTransfer,
+    /// Sends the reviewed files in an authorized idle session.
+    StartTransfer(FileSelection),
     AcceptTransfer,
     RejectTransfer,
     Disconnect,

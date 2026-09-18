@@ -74,9 +74,9 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
             model.transition_to(AppState::PairingConfirming);
             Some(Effect::SubmitPairingCode(code))
         }
-        (AppState::SessionIdle, UserAction::StartTransfer) => {
+        (AppState::SessionIdle, UserAction::StartTransfer(selection)) => {
             model.transition_to(AppState::OutboundProposal);
-            Some(Effect::StartTransfer)
+            Some(Effect::StartTransfer(selection))
         }
         (AppState::InboundProposal, UserAction::AcceptTransfer) => {
             model.transition_to(AppState::InboundProposalAccepted);
@@ -209,6 +209,7 @@ mod tests {
     use crate::app::model::{AppModel, AppState};
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
+    use crate::transfer::selection::FileSelection;
 
     const DEVICE: DeviceId = DeviceId::new(7);
 
@@ -301,9 +302,15 @@ mod tests {
             ),
             (
                 AppState::SessionIdle,
-                AppEvent::User(UserAction::StartTransfer),
+                AppEvent::User(UserAction::StartTransfer(FileSelection::for_test(&[(
+                    "report.txt",
+                    64,
+                )]))),
                 AppState::OutboundProposal,
-                Some(Effect::StartTransfer),
+                Some(Effect::StartTransfer(FileSelection::for_test(&[(
+                    "report.txt",
+                    64,
+                )]))),
             ),
             (
                 AppState::SessionIdle,
@@ -458,7 +465,10 @@ mod tests {
             }
 
             let mut model = model_in(state);
-            let effects = update(&mut model, AppEvent::User(UserAction::StartTransfer));
+            let effects = update(
+                &mut model,
+                AppEvent::User(UserAction::StartTransfer(FileSelection::default())),
+            );
 
             assert_eq!(model.state(), state, "state: {state:?}");
             assert!(effects.is_empty(), "state: {state:?}");

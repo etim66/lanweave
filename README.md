@@ -41,9 +41,12 @@ The app is interactive rather than a set of one-shot shell commands.
 - If the peer accepts, they read the eight-digit code from their screen and you
   type it: digits to enter, Backspace to edit, Enter to submit, Escape to
   cancel. The code expires after about two minutes.
-- Paste one or more file paths into the file area, review them, and select **Send**.
-- `/send` is available only in an authorized idle session. `/disconnect` is
-  available only while connected, and `/quit` closes Lanweave.
+- Use `/send` to review files before a transfer. Paste one path per line (or a
+  quoted path), press Enter to review, Backspace to remove the highlighted
+  file, and Enter again to send.
+- `/send` opens the review list while browsing or in an idle session, but files
+  can only be sent from an authorized idle session. `/disconnect` is available
+  only while connected, and `/quit` closes Lanweave.
 
 The exact command names may change during implementation, but `/` will always show the available actions.
 

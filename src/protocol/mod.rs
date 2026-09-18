@@ -20,6 +20,7 @@ mod strict;
 
 // The re-exports below are the module's API surface for the transport
 // integration in a later PR, so they are unused for now.
+pub(crate) use message::is_valid_filename;
 #[allow(unused_imports)]
 pub use message::{
     CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEnd, FileEntry, FileFailure,

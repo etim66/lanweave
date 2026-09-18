@@ -2,6 +2,7 @@ use std::io;
 use std::sync::atomic::Ordering;
 
 use crossterm::cursor::{Hide, Show};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -14,6 +15,8 @@ pub(super) trait TerminalControl {
     fn enable_raw(&mut self) -> io::Result<()>;
     fn enter_alternate_screen(&mut self) -> io::Result<()>;
     fn hide_cursor(&mut self) -> io::Result<()>;
+    fn enable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn disable_bracketed_paste(&mut self) -> io::Result<()>;
     fn show_cursor(&mut self) -> io::Result<()>;
     fn leave_alternate_screen(&mut self) -> io::Result<()>;
     fn disable_raw(&mut self) -> io::Result<()>;
@@ -33,6 +36,14 @@ impl TerminalControl for CrosstermControl {
 
     fn hide_cursor(&mut self) -> io::Result<()> {
         execute!(io::stdout(), Hide)
+    }
+
+    fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), EnableBracketedPaste)
+    }
+
+    fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), DisableBracketedPaste)
     }
 
     fn show_cursor(&mut self) -> io::Result<()> {
@@ -58,6 +69,7 @@ pub(super) struct TerminalGuard<C: TerminalControl> {
     raw: bool,
     alternate_screen: bool,
     cursor_hidden: bool,
+    bracketed_paste: bool,
     marks_process_active: bool,
 }
 
@@ -72,6 +84,7 @@ impl<C: TerminalControl> TerminalGuard<C> {
             raw: false,
             alternate_screen: false,
             cursor_hidden: false,
+            bracketed_paste: false,
             marks_process_active,
         };
 
@@ -85,6 +98,8 @@ impl<C: TerminalControl> TerminalGuard<C> {
         guard.control.enter_alternate_screen()?;
         guard.cursor_hidden = true;
         guard.control.hide_cursor()?;
+        guard.bracketed_paste = true;
+        guard.control.enable_bracketed_paste()?;
         Ok(guard)
     }
 
@@ -94,6 +109,12 @@ impl<C: TerminalControl> TerminalGuard<C> {
     /// flag stays set only while any change is still applied.
     pub(super) fn restore(&mut self) -> io::Result<()> {
         let mut first_error = None;
+        if self.bracketed_paste {
+            match self.control.disable_bracketed_paste() {
+                Ok(()) => self.bracketed_paste = false,
+                Err(error) => remember_first_error(&mut first_error, error),
+            }
+        }
         if self.cursor_hidden {
             match self.control.show_cursor() {
                 Ok(()) => self.cursor_hidden = false,
@@ -114,7 +135,8 @@ impl<C: TerminalControl> TerminalGuard<C> {
         }
 
         if self.marks_process_active {
-            let still_active = self.cursor_hidden || self.alternate_screen || self.raw;
+            let still_active =
+                self.bracketed_paste || self.cursor_hidden || self.alternate_screen || self.raw;
             TERMINAL_ACTIVE.store(still_active, Ordering::SeqCst);
         }
 
@@ -188,6 +210,14 @@ mod tests {
             self.call("hide_cursor")
         }
 
+        fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.call("enable_bracketed_paste")
+        }
+
+        fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.call("disable_bracketed_paste")
+        }
+
         fn show_cursor(&mut self) -> io::Result<()> {
             self.call("show_cursor")
         }
@@ -216,6 +246,8 @@ mod tests {
                 "enable_raw",
                 "enter_alternate",
                 "hide_cursor",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
                 "show_cursor",
                 "leave_alternate",
                 "disable_raw",
@@ -247,6 +279,19 @@ mod tests {
                     "disable_raw",
                 ],
             ),
+            (
+                "enable_bracketed_paste",
+                vec![
+                    "enable_raw",
+                    "enter_alternate",
+                    "hide_cursor",
+                    "enable_bracketed_paste",
+                    "disable_bracketed_paste",
+                    "show_cursor",
+                    "leave_alternate",
+                    "disable_raw",
+                ],
+            ),
         ];
 
         for (failure, expected) in cases {
@@ -269,6 +314,8 @@ mod tests {
                 "enable_raw",
                 "enter_alternate",
                 "hide_cursor",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
                 "show_cursor",
                 "leave_alternate",
                 "disable_raw",
@@ -279,7 +326,12 @@ mod tests {
 
     #[test]
     fn drop_retries_each_failed_cleanup_step() {
-        for failure in ["show_cursor", "leave_alternate", "disable_raw"] {
+        for failure in [
+            "disable_bracketed_paste",
+            "show_cursor",
+            "leave_alternate",
+            "disable_raw",
+        ] {
             let (control, calls) = FakeControl::new(Some(failure));
             let mut guard = TerminalGuard::start(control, false).unwrap();
 

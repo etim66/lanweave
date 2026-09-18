@@ -4,6 +4,7 @@ use super::action::{ConnectionTarget, KeyInput, PairingPeer, UserAction};
 use super::failure::FailureKind;
 use crate::discovery::DiscoveryEvent;
 use crate::pairing::PairingCode;
+use crate::transfer::selection::FileSelection;
 
 /// Inputs consumed by the application runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,8 @@ pub(crate) enum AppEvent {
     },
     Discovery(DiscoveryEvent),
     KeyInput(KeyInput),
+    /// Bracketed-paste text from the terminal.
+    Paste(String),
     User(UserAction),
     /// An inbound `pair_request` is waiting for the local user's decision.
     IncomingPairingRequest(PairingPeer),
@@ -43,7 +46,7 @@ pub(crate) enum Effect {
     RejectPairing,
     RejectPairingBusy,
     SubmitPairingCode(PairingCode),
-    StartTransfer,
+    StartTransfer(FileSelection),
     AcceptTransfer,
     RejectTransfer,
     Disconnect,

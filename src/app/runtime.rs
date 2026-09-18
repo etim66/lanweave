@@ -110,6 +110,10 @@ impl AppRuntime {
                 }
             }
             AppEvent::User(action) => self.apply_user_action(action),
+            AppEvent::Paste(text) => {
+                interaction::apply_paste(&mut self.ui, &text);
+                Vec::new()
+            }
             event => update(&mut self.model, event),
         };
 
@@ -164,6 +168,7 @@ mod tests {
     use crate::app::event::{AppEvent, Effect};
     use crate::app::model::AppState;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
+    use crate::transfer::selection::FileSelection;
 
     #[test]
     fn event_channel_is_bounded() {
@@ -209,7 +214,7 @@ mod tests {
             ))),
             AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
             AppEvent::PairingSucceeded,
-            AppEvent::User(UserAction::StartTransfer),
+            AppEvent::User(UserAction::StartTransfer(FileSelection::default())),
             AppEvent::ProposalRejected,
             AppEvent::ShutdownRequested,
         ] {
@@ -232,7 +237,10 @@ mod tests {
                 }
             ))
         );
-        assert_eq!(effect_receiver.recv().await, Some(Effect::StartTransfer));
+        assert_eq!(
+            effect_receiver.recv().await,
+            Some(Effect::StartTransfer(FileSelection::default()))
+        );
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
     }
@@ -450,6 +458,58 @@ mod tests {
         );
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn pasted_paths_review_and_send_through_the_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("lanweave-runtime-{:016x}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("payload.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        let (event_sender, event_receiver) = event_channel();
+        let (effect_sender, mut effect_receiver) = effect_channel();
+
+        for event in [
+            AppEvent::StartupCompleted,
+            AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
+                "peer",
+                Instant::now(),
+            ))),
+            AppEvent::KeyInput(KeyInput::Down),
+            AppEvent::KeyInput(KeyInput::Enter),
+            AppEvent::PairingSucceeded,
+            AppEvent::User(UserAction::OpenFileSelection),
+            AppEvent::Paste(file.display().to_string()),
+            AppEvent::KeyInput(KeyInput::Enter),
+            AppEvent::KeyInput(KeyInput::Enter),
+        ] {
+            event_sender.send(event).await.unwrap();
+        }
+        drop(event_sender);
+
+        let model = AppRuntime::new(event_receiver, effect_sender)
+            .run()
+            .await
+            .unwrap();
+
+        assert_eq!(model.state(), AppState::ShuttingDown);
+        assert!(matches!(
+            effect_receiver.recv().await,
+            Some(Effect::Connect(_))
+        ));
+        match effect_receiver.recv().await {
+            Some(Effect::StartTransfer(selection)) => {
+                assert_eq!(selection.len(), 1);
+                assert_eq!(selection.files()[0].name(), "payload.txt");
+                assert_eq!(selection.files()[0].size(), 4);
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
+        assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
+        assert_eq!(effect_receiver.recv().await, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
