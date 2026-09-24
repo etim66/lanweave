@@ -80,7 +80,7 @@ Exit criteria:
 - Manual close and 600-second idle close work from both peers.
 - A new connection always requires fresh pairing.
 
-Status: same-session repeated and reverse transfers, pre-`ready` rejection, active-transfer cleanup and close, and the fixed initiator-priority simultaneous-request rule are implemented. The explicit `session_close` message and the 600-second idle deadline remain to be wired in.
+Status: implemented. Same-session repeated and reverse transfers, pre-`ready` rejection, active-transfer cleanup and close, the fixed initiator-priority simultaneous-request rule, the explicit `session_close` message with `user_closed`, `idle_timeout`, and `shutdown` reasons, the fixed 600-second idle deadline, and bounded transfer-progress deadlines are wired in.
 
 ## Gate 7: Hardening And Release
 

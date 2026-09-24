@@ -3,9 +3,12 @@
 //! One task owns each connection and its mutable session state. After the
 //! `session_idle` state is reached, the reusable transfer loop runs here.
 //!
-//! This feature implements the pairing half: TCP/TLS setup, the `hello` and
-//! `pair_request` exchange, the one-time code, the four SPAKE2 records, and
-//! the authorized idle session. Transfer policy arrives in a later feature.
+//! This module owns the whole connection lifetime: TCP/TLS setup, the `hello`
+//! and `pair_request` exchange, the one-time code, the four SPAKE2 records,
+//! the authorized idle session, and its close paths. Manual close, peer
+//! `session_close`, the fixed 600-second idle deadline, bounded transfer
+//! progress deadlines, and app shutdown all end the connection with a
+//! best-effort close reason.
 //!
 //! The manager owns at most one connection at a time, so an extra inbound
 //! socket is refused with `pair_response(busy)` and never enters the
@@ -30,9 +33,9 @@ use crate::app::runtime::EventSender;
 use crate::framing::Frame;
 use crate::pairing::{self, PairingCode};
 use crate::protocol::{
-    self, CancelCode, Control, ErrorCode, ErrorMessage, FileEnd, FileResult, Hello, PairRejection,
-    PairResponse, PairingRecord, PairingStep, Phase, ProtocolAction, ProtocolState, Role,
-    TransferCancel, TransferRejection, TransferRequest, TransferResponse,
+    self, CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEnd, FileResult, Hello,
+    PairRejection, PairResponse, PairingRecord, PairingStep, Phase, ProtocolAction, ProtocolState,
+    Role, SessionClose, TransferCancel, TransferRejection, TransferRequest, TransferResponse,
 };
 use crate::storage::{Destination, StorageError};
 use crate::transfer::engine::{self, IncomingFile};
@@ -49,11 +52,16 @@ const CONNECTION_COMMAND_CAPACITY: usize = 4;
 const NOTICE_CHANNEL_CAPACITY: usize = 4;
 /// Time allowed for the manager to stop before it is aborted.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Time allowed for an active connection to send `session_close` on shutdown.
+const CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Local deadlines for one pairing attempt.
+/// Local deadlines for one pairing attempt and the authorized session.
 ///
-/// The defaults match `docs/PROTOCOL.md`: the prompt and the code live for
-/// 120 monotonic seconds. Tests override them to run quickly.
+/// The prompt and code defaults match `docs/PROTOCOL.md`: the prompt and the
+/// code live for 120 monotonic seconds. The idle default is the fixed
+/// 600-second session maximum; tests override it to run quickly. The progress
+/// deadline bounds one active transfer that stops making progress and is local
+/// policy, not a wire constant.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SessionTimeouts {
     /// TCP and TLS setup for one connection.
@@ -64,6 +72,10 @@ pub(crate) struct SessionTimeouts {
     pub(crate) prompt: Duration,
     /// The code lifetime from acceptance through mutual confirmation.
     pub(crate) code: Duration,
+    /// Maximum idle time without a proposal or active transfer.
+    pub(crate) idle: Duration,
+    /// Maximum time an active transfer may make no progress.
+    pub(crate) progress: Duration,
 }
 
 impl Default for SessionTimeouts {
@@ -73,6 +85,8 @@ impl Default for SessionTimeouts {
             control: Duration::from_secs(15),
             prompt: Duration::from_secs(120),
             code: Duration::from_secs(120),
+            idle: Duration::from_secs(600),
+            progress: Duration::from_secs(60),
         }
     }
 }
@@ -130,7 +144,8 @@ impl SessionService {
     pub(crate) async fn stop(self) {
         let Self { commands, mut task } = self;
         // Closing the command channel makes the manager take its cleanup
-        // path, which aborts the active connection before returning.
+        // path, which asks the active connection to report
+        // `session_close(shutdown)` before its transport closes.
         drop(commands);
         if tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut task)
             .await
@@ -156,7 +171,8 @@ enum ConnectionCommand {
     StartTransfer(FileSelection),
     AcceptTransfer(PathBuf),
     RejectTransfer,
-    Close,
+    /// Ends the connection, sending `session_close(code)` when authorized.
+    Close(CloseCode),
 }
 
 /// Why a connection task stopped.
@@ -260,10 +276,23 @@ async fn manager_loop(
         }
     }
 
-    // Shutdown closes the active connection before the manager returns.
-    if let Some(active) = active.take() {
-        active.task.abort();
-        let _ = active.task.await;
+    // Shutdown asks the active connection to report `session_close(shutdown)`
+    // before its transport closes, then waits briefly before aborting it.
+    if let Some(mut active) = active.take() {
+        let cleanup = async {
+            let _ = active
+                .commands
+                .send(ConnectionCommand::Close(CloseCode::Shutdown))
+                .await;
+            let _ = (&mut active.task).await;
+        };
+        if tokio::time::timeout(CONNECTION_CLOSE_TIMEOUT, cleanup)
+            .await
+            .is_err()
+        {
+            active.task.abort();
+            let _ = active.task.await;
+        }
     }
     if let Some(busy) = busy.take() {
         busy.abort();
@@ -285,7 +314,7 @@ fn connection_command(command: SessionCommand) -> Option<ConnectionCommand> {
             Some(ConnectionCommand::AcceptTransfer(destination))
         }
         SessionCommand::RejectTransfer => Some(ConnectionCommand::RejectTransfer),
-        SessionCommand::Disconnect => Some(ConnectionCommand::Close),
+        SessionCommand::Disconnect => Some(ConnectionCommand::Close(CloseCode::UserClosed)),
         // The manager handles `Connect` before this routing step.
         SessionCommand::Connect(_) => None,
     }
@@ -376,6 +405,9 @@ struct SessionConnection {
     protocol: ProtocolState,
     /// The peer's untrusted `hello` display name, shown on transfer review.
     peer_name: Option<String>,
+    /// Local close reason to report to the peer when this side ends an
+    /// authorized session; `None` when the peer closed or the session failed.
+    close_code: Option<CloseCode>,
 }
 
 impl SessionConnection {
@@ -387,6 +419,7 @@ impl SessionConnection {
             outbound,
             protocol: ProtocolState::new(role),
             peer_name: None,
+            close_code: None,
         }
     }
 
@@ -412,11 +445,20 @@ impl SessionConnection {
         Ok(actions)
     }
 
-    /// Flushes queued frames and shuts the write half down cleanly.
+    /// Flushes queued frames, reports the local close reason when the session
+    /// is still authorized, and shuts the write half down cleanly.
     ///
     /// The peer observes every queued frame followed by one clean close, so a
-    /// rejection response can never be truncated by an abrupt drop.
+    /// rejection response can never be truncated by an abrupt drop. A
+    /// `session_close` is not acknowledged.
     async fn close(&mut self) {
+        if let Some(code) = self.close_code.take()
+            && self.protocol.is_authorized()
+        {
+            let _ = self
+                .send_control_flushed(&Control::SessionClose(SessionClose { code }))
+                .await;
+        }
         self.outbound.close().await;
     }
 
@@ -519,7 +561,7 @@ async fn read_control(
     loop {
         match wait_stage(connection, commands, deadline).await? {
             Stage::Control(inbound) => return Ok(inbound),
-            Stage::Finished | Stage::TimedOut | Stage::Command(ConnectionCommand::Close) => {
+            Stage::Finished | Stage::TimedOut | Stage::Command(ConnectionCommand::Close(_)) => {
                 return Err(FlowOutcome::Ended);
             }
             Stage::Command(_) => continue,
@@ -564,7 +606,7 @@ async fn wait_decision(
             Stage::Command(ConnectionCommand::Decide(true)) => return Ok(Decision::Accept),
             Stage::Command(ConnectionCommand::Decide(false)) => return Ok(Decision::Reject),
             Stage::Command(ConnectionCommand::RejectBusy) => return Ok(Decision::Busy),
-            Stage::Command(ConnectionCommand::Close) | Stage::Finished => {
+            Stage::Command(ConnectionCommand::Close(_)) | Stage::Finished => {
                 return Ok(Decision::Close);
             }
             Stage::TimedOut => return Ok(Decision::Timeout),
@@ -585,7 +627,7 @@ async fn wait_code(
     loop {
         match wait_stage(connection, commands, deadline).await? {
             Stage::Command(ConnectionCommand::SubmitCode(code)) => return Ok(code),
-            Stage::Finished | Stage::TimedOut | Stage::Command(ConnectionCommand::Close) => {
+            Stage::Finished | Stage::TimedOut | Stage::Command(ConnectionCommand::Close(_)) => {
                 return Err(FlowOutcome::Ended);
             }
             Stage::Control(_) | Stage::Command(_) => continue,
@@ -1012,8 +1054,8 @@ async fn responder_pairing(
 /// Keeps an authorized connection open across any number of transfers.
 ///
 /// Each round is one idle wait followed by either an outbound or inbound
-/// transfer. `Ok(())` means the session returned to idle; every error ends
-/// the authorized session.
+/// transfer. `Ok(())` means the session returned to idle and a fresh 600-second
+/// deadline starts; every error ends the authorized session.
 async fn idle_authorized(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
@@ -1021,7 +1063,8 @@ async fn idle_authorized(
     timeouts: SessionTimeouts,
 ) -> FlowOutcome {
     loop {
-        match session_round(connection, commands, events, timeouts).await {
+        let idle_deadline = Instant::now() + timeouts.idle;
+        match session_round(connection, commands, events, timeouts, idle_deadline).await {
             Ok(()) => continue,
             // Any failure after authorization closes the session cleanly so
             // in-flight DATA cannot enter a later transfer.
@@ -1031,16 +1074,24 @@ async fn idle_authorized(
 }
 
 /// Waits for the next transfer proposal or a local command while idle.
+///
+/// The idle deadline only covers this wait. Starting a proposal or transfer
+/// leaves this function, so active work is governed by its own deadlines.
 async fn session_round(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
     events: &EventSender,
     timeouts: SessionTimeouts,
+    idle_deadline: Instant,
 ) -> FlowResult<()> {
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(ConnectionCommand::StartTransfer(selection)) => {
                     return run_outbound(connection, commands, events, selection, timeouts).await;
                 }
@@ -1059,6 +1110,12 @@ async fn session_round(
                     // A stale collision response is consumed by the protocol
                     // state; anything else valid here is ignored.
                 }
+            },
+            // The local close reason is reported by `SessionConnection::close`
+            // once the flow ends.
+            () = tokio::time::sleep_until(idle_deadline) => {
+                connection.close_code = Some(CloseCode::IdleTimeout);
+                return Err(FlowOutcome::SessionEnded);
             },
         }
     }
@@ -1125,7 +1182,7 @@ async fn run_outbound(
         let _ = events.send(AppEvent::ProposalRejected).await;
         return Ok(());
     }
-    run_sending(connection, commands, events, selection).await
+    run_sending(connection, commands, events, selection, timeouts).await
 }
 
 /// Maps the phase after a peer `transfer_response` to its decision.
@@ -1150,7 +1207,11 @@ async fn wait_transfer_response(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(_) => continue,
             },
             result = timeout_at(deadline, connection.read()) => match result {
@@ -1198,7 +1259,11 @@ async fn wait_ready(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(_) => continue,
             },
             result = timeout_at(deadline, connection.read()) => match result {
@@ -1262,7 +1327,16 @@ async fn run_review(
                         .send_control(&Control::TransferResponse(TransferResponse::accepted()))
                         .await?;
                     connection.send_control(&Control::Ready).await?;
-                    run_receiving(connection, commands, events, request, destination, first).await
+                    run_receiving(
+                        connection,
+                        commands,
+                        events,
+                        request,
+                        destination,
+                        first,
+                        timeouts,
+                    )
+                    .await
                 }
                 Err(reason) => {
                     let _ = connection
@@ -1308,7 +1382,11 @@ async fn wait_transfer_decision(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(ConnectionCommand::AcceptTransfer(destination)) => {
                     return Ok(ReviewDecision::Accept(destination));
                 }
@@ -1368,13 +1446,14 @@ async fn run_sending(
     commands: &mut mpsc::Receiver<ConnectionCommand>,
     events: &EventSender,
     selection: FileSelection,
+    timeouts: SessionTimeouts,
 ) -> FlowResult<()> {
     let files = u16::try_from(selection.len()).map_err(|_| FlowOutcome::Failed)?;
     let _ = events.send(AppEvent::TransferStarted).await;
     for index in 0..files {
         let file = &selection.files()[usize::from(index)];
         let _ = events.send(progress_event(index, files, 0)).await;
-        if stream_one_file(connection, commands, file, index).await? {
+        if stream_one_file(connection, commands, file, index, timeouts).await? {
             let _ = events.send(AppEvent::TransferFinished).await;
             return Ok(());
         }
@@ -1385,12 +1464,15 @@ async fn run_sending(
 
 /// Streams one reviewed file and waits for its verified result.
 ///
-/// Returns `true` when the result completed the whole transfer.
+/// Returns `true` when the result completed the whole transfer. Queuing one
+/// DATA frame is bounded by the progress deadline so a stalled peer closes the
+/// session instead of blocking the sender forever.
 async fn stream_one_file(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
     file: &SelectedFile,
     index: u16,
+    timeouts: SessionTimeouts,
 ) -> FlowResult<bool> {
     let (sender, mut receiver) = mpsc::channel(engine::DATA_CHANNEL_CAPACITY);
     let path = file.path().to_owned();
@@ -1400,7 +1482,11 @@ async fn stream_one_file(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(_) => continue,
             },
             chunk = receiver.recv() => match chunk {
@@ -1408,11 +1494,19 @@ async fn stream_one_file(
                     protocol::send_data(&connection.protocol).map_err(|_| FlowOutcome::Failed)?;
                     // The writer prefers queued DATA, so the file_end queued
                     // after the last chunk can never overtake it.
-                    connection
-                        .outbound
-                        .send_data(chunk)
-                        .await
-                        .map_err(|_| FlowOutcome::Failed)?;
+                    match timeout_at(
+                        Instant::now() + timeouts.progress,
+                        connection.outbound.send_data(chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => return Err(FlowOutcome::Failed),
+                        Err(_) => {
+                            report_timeout(connection).await;
+                            return Err(FlowOutcome::SessionEnded);
+                        }
+                    }
                 }
                 None => break,
             },
@@ -1444,24 +1538,38 @@ async fn stream_one_file(
             sha256: digest,
         }))
         .await?;
-    wait_file_result(connection, commands).await
+    wait_file_result(connection, commands, timeouts.progress).await
 }
 
 /// Waits for the recipient's verified result for the current file.
+///
+/// The wait is bounded by the progress deadline so a silent recipient closes
+/// the session instead of holding the sender open forever.
 async fn wait_file_result(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
+    progress: Duration,
 ) -> FlowResult<bool> {
+    let mut deadline = Instant::now() + progress;
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(_) => continue,
             },
-            result = connection.read() => match result? {
-                None => return Err(FlowOutcome::SessionEnded),
-                Some(InboundMessage::Data(_)) => return Err(FlowOutcome::Failed),
-                Some(InboundMessage::Control(inbound)) => {
+            result = timeout_at(deadline, connection.read()) => match result {
+                Err(_) => {
+                    report_timeout(connection).await;
+                    return Err(FlowOutcome::SessionEnded);
+                }
+                Ok(Ok(None)) => return Err(FlowOutcome::SessionEnded),
+                Ok(Ok(Some(InboundMessage::Data(_)))) => return Err(FlowOutcome::Failed),
+                Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
+                    deadline = Instant::now() + progress;
                     send_actions(connection, &inbound.actions).await?;
                     match inbound.control {
                         Control::FileResult(_) => {
@@ -1473,12 +1581,16 @@ async fn wait_file_result(
                         _ => continue,
                     }
                 }
+                Ok(Err(outcome)) => return Err(outcome),
             },
         }
     }
 }
 
 /// Receives every manifest entry in order and verifies each digest.
+///
+/// Every inbound frame resets the progress deadline, so a peer that goes silent
+/// mid-transfer closes the session after cleanup instead of hanging.
 async fn run_receiving(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
@@ -1486,27 +1598,39 @@ async fn run_receiving(
     request: TransferRequest,
     destination: Destination,
     mut incoming: IncomingFile,
+    timeouts: SessionTimeouts,
 ) -> FlowResult<()> {
     let files = u16::try_from(request.files.len()).map_err(|_| FlowOutcome::Failed)?;
     let _ = events.send(AppEvent::TransferStarted).await;
     let _ = events.send(progress_event(0, files, 0)).await;
     let mut index = 0u16;
+    let mut deadline = Instant::now() + timeouts.progress;
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                None | Some(ConnectionCommand::Close) => return Err(FlowOutcome::SessionEnded),
+                None => return Err(FlowOutcome::SessionEnded),
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
                 Some(_) => continue,
             },
-            result = connection.read() => match result? {
-                None => return Err(FlowOutcome::SessionEnded),
-                Some(InboundMessage::Data(chunk)) => {
+            result = timeout_at(deadline, connection.read()) => match result {
+                Err(_) => {
+                    report_timeout(connection).await;
+                    return Err(FlowOutcome::SessionEnded);
+                }
+                Ok(Ok(None)) => return Err(FlowOutcome::SessionEnded),
+                Ok(Ok(Some(InboundMessage::Data(chunk)))) => {
+                    deadline = Instant::now() + timeouts.progress;
                     if incoming.write(&chunk).await.is_err() {
                         // The partial file is removed when it is dropped.
                         report_internal_error(connection).await;
                         return Err(FlowOutcome::SessionEnded);
                     }
                 }
-                Some(InboundMessage::Control(inbound)) => {
+                Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
+                    deadline = Instant::now() + timeouts.progress;
                     match inbound.control {
                         Control::FileEnd(file_end) => {
                             if file_end.index != index {
@@ -1554,6 +1678,7 @@ async fn run_receiving(
                         _ => continue,
                     }
                 }
+                Ok(Err(outcome)) => return Err(outcome),
             },
         }
     }
@@ -1564,6 +1689,15 @@ async fn report_internal_error(connection: &mut SessionConnection) {
     let _ = connection
         .send_control_flushed(&Control::Error(ErrorMessage {
             code: ErrorCode::InternalError,
+        }))
+        .await;
+}
+
+/// Reports an expired data-progress deadline, which closes the session.
+async fn report_timeout(connection: &mut SessionConnection) {
+    let _ = connection
+        .send_control_flushed(&Control::Error(ErrorMessage {
+            code: ErrorCode::Timeout,
         }))
         .await;
 }
@@ -1611,19 +1745,24 @@ mod tests {
     use crate::framing::Frame;
     use crate::pairing::PairingCode;
     use crate::protocol::{
-        Control, ErrorCode, ErrorMessage, FileEntry, Hello, PairRejection, PairingRecord,
-        PairingStep, Phase, TransferRejection, TransferRequest, TransferResponse,
+        CloseCode, Control, ErrorCode, ErrorMessage, FileEntry, Hello, PairRejection,
+        PairingRecord, PairingStep, Phase, TransferRejection, TransferRequest, TransferResponse,
     };
     use crate::transfer::selection::FileSelection;
     use crate::transport::{FramedConnection, Outbound, TlsHandshake};
 
     /// Short deadlines so one test covers several stages quickly.
+    ///
+    /// The idle and progress deadlines stay long unless a test overrides them,
+    /// so no existing flow test is cut short by either new deadline.
     fn test_timeouts() -> SessionTimeouts {
         SessionTimeouts {
             handshake: Duration::from_secs(5),
             control: Duration::from_secs(5),
             prompt: Duration::from_secs(5),
             code: Duration::from_secs(5),
+            idle: Duration::from_secs(60),
+            progress: Duration::from_secs(60),
         }
     }
 
@@ -2525,5 +2664,279 @@ mod tests {
         .expect("the real rejection must decide the proposal");
 
         responder.stop().await;
+    }
+
+    #[tokio::test]
+    async fn manual_close_sends_session_close_user_closed() {
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, _outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        responder.send(SessionCommand::Disconnect).await.unwrap();
+
+        let Frame::Control(body) = raw_frame(&mut peer).await else {
+            panic!("the close reason must arrive as a control frame");
+        };
+        assert!(matches!(
+            Control::decode(&body),
+            Ok(Control::SessionClose(close)) if close.code == CloseCode::UserClosed
+        ));
+        // The message is not acknowledged; the transport closes after it.
+        assert!(peer.read_frame().await.unwrap().is_none());
+        assert!(matches!(
+            next_event(&mut responder_events).await,
+            AppEvent::SessionClosed
+        ));
+    }
+
+    #[tokio::test]
+    async fn idle_expiry_sends_session_close_idle_timeout() {
+        let timeouts = SessionTimeouts {
+            idle: Duration::from_millis(200),
+            ..test_timeouts()
+        };
+        let (responder, mut responder_events, address) = responder_under_test(timeouts).await;
+        let handshake = crate::transport::connect(address, timeouts.handshake)
+            .await
+            .unwrap();
+        let (mut peer, _outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        let Frame::Control(body) = raw_frame(&mut peer).await else {
+            panic!("the idle close reason must arrive as a control frame");
+        };
+        assert!(matches!(
+            Control::decode(&body),
+            Ok(Control::SessionClose(close)) if close.code == CloseCode::IdleTimeout
+        ));
+        assert!(peer.read_frame().await.unwrap().is_none());
+        assert!(matches!(
+            next_event(&mut responder_events).await,
+            AppEvent::SessionClosed
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_pending_proposal_stops_the_idle_deadline_and_it_restarts_after_finish() {
+        let timeouts = SessionTimeouts {
+            idle: Duration::from_millis(200),
+            ..test_timeouts()
+        };
+        let source = temp_root("idle-source");
+        let destination = temp_root("idle-destination");
+        let report = source.join("report.txt");
+        std::fs::write(&report, b"report body").unwrap();
+
+        let (responder, mut responder_events, address) = responder_under_test(timeouts).await;
+        let (initiator, mut initiator_events) = initiator_under_test(timeouts).await;
+        pair_services(
+            &initiator,
+            &mut initiator_events,
+            &responder,
+            &mut responder_events,
+            address,
+        )
+        .await;
+
+        // A pending proposal outlives the idle deadline without closing.
+        initiator
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("report.txt".to_owned(), 11)]
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        responder
+            .send(SessionCommand::AcceptTransfer(destination.clone()))
+            .await
+            .unwrap();
+        wait_started(&mut initiator_events).await;
+        wait_started(&mut responder_events).await;
+        wait_finished(&mut initiator_events).await;
+        wait_finished(&mut responder_events).await;
+        assert_eq!(
+            std::fs::read(destination.join("report.txt")).unwrap(),
+            b"report body"
+        );
+
+        // Returning to idle starts a fresh deadline, which then closes both.
+        assert!(matches!(
+            next_matching(&mut initiator_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+
+        responder.stop().await;
+        initiator.stop().await;
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(destination);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_sender_closes_at_the_receivers_progress_deadline() {
+        let timeouts = SessionTimeouts {
+            progress: Duration::from_millis(200),
+            ..test_timeouts()
+        };
+        let destination = temp_root("stalled-destination");
+        let (responder, mut responder_events, address) = responder_under_test(timeouts).await;
+        let handshake = crate::transport::connect(address, timeouts.handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        // The raw peer proposes a file, the responder accepts, and then no
+        // DATA ever arrives.
+        outbound
+            .send_control(&Control::TransferRequest(
+                TransferRequest::new(vec![FileEntry {
+                    name: "stalled.bin".to_owned(),
+                    size: 4,
+                }])
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("stalled.bin".to_owned(), 4)]
+        );
+        responder
+            .send(SessionCommand::AcceptTransfer(destination.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferResponse(response) if response.accepted
+        ));
+        assert!(matches!(raw_control(&mut peer).await, Control::Ready));
+
+        // The progress deadline expires, the partial file is removed, and the
+        // session closes.
+        let Frame::Control(body) = raw_frame(&mut peer).await else {
+            panic!("the timeout report must arrive as a control frame");
+        };
+        assert!(matches!(
+            Control::decode(&body),
+            Ok(Control::Error(error)) if error.code == ErrorCode::Timeout
+        ));
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(destination);
+    }
+
+    #[tokio::test]
+    async fn a_silent_recipient_closes_the_sender_at_the_progress_deadline() {
+        let timeouts = SessionTimeouts {
+            progress: Duration::from_millis(200),
+            ..test_timeouts()
+        };
+        let source = temp_root("silent-source");
+        let report = source.join("report.txt");
+        std::fs::write(&report, b"report body").unwrap();
+
+        let (responder, mut responder_events, address) = responder_under_test(timeouts).await;
+        let handshake = crate::transport::connect(address, timeouts.handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        // The local side proposes; the raw peer accepts the manifest and reads
+        // every DATA frame, then never answers with `file_result`.
+        responder
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferRequest(_)
+        ));
+        outbound
+            .send_control(&Control::TransferResponse(TransferResponse::accepted()))
+            .await
+            .unwrap();
+        outbound.send_control(&Control::Ready).await.unwrap();
+        loop {
+            match raw_frame(&mut peer).await {
+                Frame::Data(_) => continue,
+                Frame::Control(body) => match Control::decode(&body) {
+                    Ok(Control::FileEnd(_)) => break,
+                    Ok(_) => continue,
+                    Err(_) => panic!("the file stream carries valid controls"),
+                },
+            }
+        }
+
+        // The file-result deadline expires, the sender reports the timeout,
+        // and the session closes.
+        let Frame::Control(body) = raw_frame(&mut peer).await else {
+            panic!("the timeout report must arrive as a control frame");
+        };
+        assert!(matches!(
+            Control::decode(&body),
+            Ok(Control::Error(error)) if error.code == ErrorCode::Timeout
+        ));
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+        assert!(peer.read_frame().await.unwrap().is_none());
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(source);
+    }
+
+    #[tokio::test]
+    async fn app_shutdown_sends_session_close_shutdown() {
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, _outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        responder.stop().await;
+
+        let Frame::Control(body) = raw_frame(&mut peer).await else {
+            panic!("the shutdown close reason must arrive as a control frame");
+        };
+        assert!(matches!(
+            Control::decode(&body),
+            Ok(Control::SessionClose(close)) if close.code == CloseCode::Shutdown
+        ));
+        assert!(peer.read_frame().await.unwrap().is_none());
     }
 }
