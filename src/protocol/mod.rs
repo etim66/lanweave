@@ -25,7 +25,8 @@ pub(crate) use message::is_valid_filename;
 pub use message::{
     CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEnd, FileEntry, FileFailure,
     FileResult, FileStatus, Hello, MessageError, PairRejection, PairResponse, PairingRecord,
-    PairingStep, TransferCancel, TransferRejection, TransferRequest, TransferResponse,
+    PairingStep, SessionClose, TransferCancel, TransferRejection, TransferRequest,
+    TransferResponse,
 };
 #[allow(unused_imports)]
 pub use state::{
