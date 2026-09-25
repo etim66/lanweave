@@ -158,7 +158,7 @@ mod tests {
         let backgrounds = render_backgrounds(&model, 80, 24);
 
         assert!(output.contains("Ready"));
-        assert!(output.contains("v0.1.0"));
+        assert!(output.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(backgrounds.contains(&BACKGROUND));
         assert!(backgrounds.contains(&SURFACE));
     }
@@ -668,7 +668,7 @@ mod tests {
             "the footer must show the opened directory: {output}"
         );
         assert!(output.contains("Ready"));
-        assert!(output.contains("v0.1.0"));
+        assert!(output.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]
