@@ -17,6 +17,8 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -28,18 +30,21 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::app::action::{ConnectionTarget, PairingPeer};
 use crate::app::event::AppEvent;
-use crate::app::model::{TransferProgress, TransferProposal};
+use crate::app::model::{
+    TransferDirection, TransferPreparation, TransferProgress, TransferProposal, TransferSummary,
+};
 use crate::app::runtime::EventSender;
 use crate::framing::Frame;
 use crate::pairing::{self, PairingCode};
 use crate::protocol::{
-    self, CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEnd, FileResult, Hello,
-    PairRejection, PairResponse, PairingRecord, PairingStep, Phase, ProtocolAction, ProtocolState,
-    Role, SessionClose, TransferCancel, TransferRejection, TransferRequest, TransferResponse,
+    self, CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEnd, FileEntry, FileResult,
+    Hello, PairRejection, PairResponse, PairingRecord, PairingStep, Phase, ProtocolAction,
+    ProtocolState, Role, SessionClose, TransferCancel, TransferRejection, TransferRequest,
+    TransferResponse,
 };
 use crate::storage::{Destination, StorageError};
 use crate::transfer::engine::{self, IncomingFile};
-use crate::transfer::selection::{FileSelection, SelectedFile};
+use crate::transfer::selection::{FileSelection, PrepareError, PreparedFile, PreparedSelection};
 use crate::transport::{self, FramedConnection, Outbound, split_frame_io};
 
 /// Capacity of the effect-to-session command queue.
@@ -101,6 +106,7 @@ pub(crate) enum SessionCommand {
     StartTransfer(FileSelection),
     AcceptTransfer(PathBuf),
     RejectTransfer,
+    CancelTransfer,
     Disconnect,
 }
 
@@ -171,6 +177,8 @@ enum ConnectionCommand {
     StartTransfer(FileSelection),
     AcceptTransfer(PathBuf),
     RejectTransfer,
+    /// Cancels the pending proposal or active transfer with `transfer_cancel`.
+    CancelTransfer,
     /// Ends the connection, sending `session_close(code)` when authorized.
     Close(CloseCode),
 }
@@ -314,6 +322,7 @@ fn connection_command(command: SessionCommand) -> Option<ConnectionCommand> {
             Some(ConnectionCommand::AcceptTransfer(destination))
         }
         SessionCommand::RejectTransfer => Some(ConnectionCommand::RejectTransfer),
+        SessionCommand::CancelTransfer => Some(ConnectionCommand::CancelTransfer),
         SessionCommand::Disconnect => Some(ConnectionCommand::Close(CloseCode::UserClosed)),
         // The manager handles `Connect` before this routing step.
         SessionCommand::Connect(_) => None,
@@ -408,6 +417,9 @@ struct SessionConnection {
     /// Local close reason to report to the peer when this side ends an
     /// authorized session; `None` when the peer closed or the session failed.
     close_code: Option<CloseCode>,
+    /// Set when a peer `transfer_cancel` ends an active transfer, so the local
+    /// side can still report a cancelled summary before the session closes.
+    peer_cancelled: bool,
 }
 
 impl SessionConnection {
@@ -420,6 +432,7 @@ impl SessionConnection {
             protocol: ProtocolState::new(role),
             peer_name: None,
             close_code: None,
+            peer_cancelled: false,
         }
     }
 
@@ -483,6 +496,11 @@ impl SessionConnection {
                     protocol::Inbound::Control(control.clone()),
                 )
                 .map_err(|_| FlowOutcome::Failed)?;
+                if matches!(control, Control::TransferCancel(_))
+                    && actions.contains(&ProtocolAction::SessionClosed)
+                {
+                    self.peer_cancelled = true;
+                }
                 if actions.contains(&ProtocolAction::PairingClosed) {
                     return Err(FlowOutcome::Ended);
                 }
@@ -501,6 +519,11 @@ impl SessionConnection {
                 Ok(Some(InboundMessage::Data(body)))
             }
         }
+    }
+
+    /// Returns whether the last terminal read was a peer `transfer_cancel`.
+    const fn peer_cancelled(&self) -> bool {
+        self.peer_cancelled
     }
 }
 
@@ -671,6 +694,15 @@ async fn initiator_flow(
     outcome
 }
 
+/// Builds the local `hello` with the computer name as display text.
+///
+/// The name is untrusted display text to the peer, exactly like any other
+/// `display_name`; it is only presented as a hint until pairing confirms the
+/// live connection.
+fn local_hello() -> Control {
+    Control::Hello(Hello::new(Some(crate::hostname::local_hostname())))
+}
+
 /// Runs the initiator pairing stages over an established connection.
 async fn initiator_pairing(
     connection: &mut SessionConnection,
@@ -680,11 +712,9 @@ async fn initiator_pairing(
     timeouts: SessionTimeouts,
 ) -> FlowOutcome {
     // The initiator sends the first hello and retains the exact JSON body.
-    let initiator_hello = Bytes::from(Control::Hello(Hello::new(None)).encode());
-    if let Err(outcome) = connection
-        .send_control(&Control::Hello(Hello::new(None)))
-        .await
-    {
+    let hello = local_hello();
+    let initiator_hello = Bytes::from(hello.encode());
+    if let Err(outcome) = connection.send_control(&hello).await {
         return outcome;
     }
     let inbound =
@@ -876,9 +906,7 @@ async fn busy_pairing(
     if !matches!(inbound.control, Control::Hello(_)) {
         return Err(FlowOutcome::Failed);
     }
-    connection
-        .send_control(&Control::Hello(Hello::new(None)))
-        .await?;
+    connection.send_control(&local_hello()).await?;
     let inbound = read_control_only(connection, Instant::now() + timeouts.control).await?;
     if !matches!(inbound.control, Control::PairRequest) {
         return Err(FlowOutcome::Failed);
@@ -914,11 +942,9 @@ async fn responder_pairing(
     };
     let initiator_hello = inbound.body;
     connection.peer_name = display_name.clone();
-    let responder_hello = Bytes::from(Control::Hello(Hello::new(None)).encode());
-    if let Err(outcome) = connection
-        .send_control(&Control::Hello(Hello::new(None)))
-        .await
-    {
+    let hello = local_hello();
+    let responder_hello = Bytes::from(hello.encode());
+    if let Err(outcome) = connection.send_control(&hello).await {
         return outcome;
     }
     match read_control(connection, &mut commands, Instant::now() + timeouts.control).await {
@@ -1131,6 +1157,40 @@ enum ResponseDecision {
     Withdrawn(TransferRequest),
     /// No decision arrived before the local deadline.
     TimedOut,
+    /// The local user cancelled before any data was sent.
+    Cancelled,
+}
+
+/// The result of waiting for the recipient's `ready`.
+enum ReadyDecision {
+    /// The recipient is prepared and data may start.
+    Ready,
+    /// The proposal ended without data.
+    Ended,
+    /// The local user cancelled before any data was sent.
+    Cancelled,
+}
+
+/// The result of one step of the sending loop.
+enum FileStep {
+    /// The file verified; later manifest entries may follow.
+    Continue,
+    /// The final verified result completed the whole transfer.
+    Finished,
+    /// The local user cancelled the active transfer.
+    Cancelled,
+    /// The peer cancelled the active transfer.
+    PeerCancelled,
+}
+
+/// The result of preparing a reviewed selection for sending.
+enum PrepareOutcome {
+    /// Every folder archive is built and the selection can be proposed.
+    Ready(PreparedSelection),
+    /// The local user cancelled before the request was sent.
+    Cancelled,
+    /// A folder could not be prepared; nothing was sent.
+    Failed(PrepareError),
 }
 
 /// Sends one immutable manifest and drives the resulting transfer.
@@ -1141,9 +1201,30 @@ async fn run_outbound(
     selection: FileSelection,
     timeouts: SessionTimeouts,
 ) -> FlowResult<()> {
-    let Some(request) = selection.request() else {
-        // The app only proposes reviewed selections; recover instead of
-        // stalling if an empty one ever reaches this layer.
+    let prepared = match prepare_selection(connection, commands, selection, events).await? {
+        PrepareOutcome::Ready(prepared) => prepared,
+        PrepareOutcome::Cancelled => {
+            // Nothing was proposed, so the peer needs no `transfer_cancel`.
+            let _ = events
+                .send(AppEvent::TransferCompleted(
+                    TransferSummary::new(
+                        TransferDirection::Sent,
+                        Vec::new(),
+                        None,
+                        connection.peer_name.clone(),
+                        Duration::ZERO,
+                    )
+                    .cancelled(false),
+                ))
+                .await;
+            return Ok(());
+        }
+        PrepareOutcome::Failed(error) => {
+            let _ = events.send(AppEvent::PreparationFailed(error)).await;
+            return Ok(());
+        }
+    };
+    let Some(request) = prepared.request() else {
         let _ = events.send(AppEvent::ProposalRejected).await;
         return Ok(());
     };
@@ -1175,14 +1256,178 @@ async fn run_outbound(
             let _ = events.send(AppEvent::ProposalRejected).await;
             return Ok(());
         }
+        ResponseDecision::Cancelled => {
+            report_cancel(connection, events, &prepared, 0, Duration::ZERO, false).await;
+            return Ok(());
+        }
     }
 
-    let ready = wait_ready(connection, commands, Instant::now() + timeouts.control).await?;
-    if !ready {
-        let _ = events.send(AppEvent::ProposalRejected).await;
-        return Ok(());
+    match wait_ready(connection, commands, Instant::now() + timeouts.control).await? {
+        ReadyDecision::Ready => {}
+        ReadyDecision::Ended => {
+            let _ = events.send(AppEvent::ProposalRejected).await;
+            return Ok(());
+        }
+        ReadyDecision::Cancelled => {
+            report_cancel(connection, events, &prepared, 0, Duration::ZERO, false).await;
+            return Ok(());
+        }
     }
-    run_sending(connection, commands, events, selection, timeouts).await
+    run_sending(connection, commands, events, prepared, timeouts).await
+}
+
+/// Sends `transfer_cancel` and reports a cancelled summary to the app.
+///
+/// Only the verified prefix is reported, so a cancelled summary never claims
+/// files that were not transferred.
+async fn report_cancel(
+    connection: &mut SessionConnection,
+    events: &EventSender,
+    prepared: &PreparedSelection,
+    completed: usize,
+    duration: Duration,
+    session_closed: bool,
+) {
+    let _ = connection
+        .send_control(&Control::TransferCancel(TransferCancel {
+            code: CancelCode::UserCancelled,
+        }))
+        .await;
+    let _ = events
+        .send(AppEvent::TransferCompleted(cancelled_sent_summary(
+            connection,
+            prepared,
+            completed,
+            duration,
+            session_closed,
+        )))
+        .await;
+}
+
+/// Builds a cancelled outbound summary for the first `completed` entries.
+fn cancelled_sent_summary(
+    connection: &SessionConnection,
+    prepared: &PreparedSelection,
+    completed: usize,
+    duration: Duration,
+    session_closed: bool,
+) -> TransferSummary {
+    let mut files = summary_entries(prepared);
+    files.truncate(completed);
+    TransferSummary::new(
+        TransferDirection::Sent,
+        files,
+        None,
+        connection.peer_name.clone(),
+        duration,
+    )
+    .cancelled(session_closed)
+}
+
+/// Builds a cancelled inbound summary for the first `completed` entries.
+fn cancelled_received_summary(
+    connection: &SessionConnection,
+    request: &TransferRequest,
+    destination: &Destination,
+    completed: usize,
+    duration: Duration,
+) -> TransferSummary {
+    let files = request.files[..completed.min(request.files.len())].to_vec();
+    TransferSummary::new(
+        TransferDirection::Received,
+        files,
+        Some(destination.root().to_path_buf()),
+        connection.peer_name.clone(),
+        duration,
+    )
+    .cancelled(true)
+}
+
+/// Builds the summary entries of a prepared selection.
+fn summary_entries(prepared: &PreparedSelection) -> Vec<FileEntry> {
+    prepared
+        .files()
+        .iter()
+        .map(|file| match file.folder() {
+            Some(folder) => FileEntry::folder(
+                file.name().to_owned(),
+                file.size(),
+                folder.items,
+                folder.source_size,
+            ),
+            None => FileEntry::new(file.name().to_owned(), file.size()),
+        })
+        .collect()
+}
+
+/// Builds any folder archives before the manifest is sent.
+///
+/// Files-only selections pass through without touching the filesystem. Folder
+/// archives are built on a blocking thread and reported as they progress. The
+/// command loop stays live during preparation so a local cancel stops the
+/// archive between entries and never lets the request be sent.
+async fn prepare_selection(
+    connection: &mut SessionConnection,
+    commands: &mut mpsc::Receiver<ConnectionCommand>,
+    selection: FileSelection,
+    events: &EventSender,
+) -> FlowResult<PrepareOutcome> {
+    if !selection.has_archives() {
+        let cancel = AtomicBool::new(false);
+        return selection
+            .prepare(&cancel, &mut |_, _, _, _| {})
+            .map(PrepareOutcome::Ready)
+            .map_err(|_| FlowOutcome::Failed);
+    }
+
+    let files = u16::try_from(selection.len()).map_err(|_| FlowOutcome::Failed)?;
+    let events = events.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancel);
+    let mut worker = tokio::task::spawn_blocking(move || {
+        selection.prepare(&worker_cancel, &mut |index, name, done, total| {
+            let _ = events.try_send(AppEvent::TransferPreparing(TransferPreparation {
+                name: name.to_owned(),
+                index: u16::try_from(index).unwrap_or(u16::MAX),
+                files,
+                items_done: done,
+                items_total: total,
+            }));
+        })
+    });
+
+    loop {
+        tokio::select! {
+            result = &mut worker => {
+                let result = result.map_err(|_| FlowOutcome::Failed)?;
+                // A consumed cancel must win even when the archive finished
+                // building in the same instant.
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(PrepareOutcome::Cancelled);
+                }
+                return Ok(match result {
+                    Ok(prepared) => PrepareOutcome::Ready(prepared),
+                    Err(PrepareError::Cancelled) => PrepareOutcome::Cancelled,
+                    Err(error) => PrepareOutcome::Failed(error),
+                });
+            }
+            command = commands.recv() => match command {
+                None => {
+                    cancel.store(true, Ordering::Relaxed);
+                    return Err(FlowOutcome::SessionEnded);
+                }
+                Some(ConnectionCommand::Close(code)) => {
+                    connection.close_code = Some(code);
+                    cancel.store(true, Ordering::Relaxed);
+                    return Err(FlowOutcome::SessionEnded);
+                }
+                Some(ConnectionCommand::CancelTransfer) => {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                Some(_) => continue,
+            },
+        }
+    }
 }
 
 /// Maps the phase after a peer `transfer_response` to its decision.
@@ -1211,6 +1456,9 @@ async fn wait_transfer_response(
                 Some(ConnectionCommand::Close(code)) => {
                     connection.close_code = Some(code);
                     return Err(FlowOutcome::SessionEnded);
+                }
+                Some(ConnectionCommand::CancelTransfer) => {
+                    return Ok(ResponseDecision::Cancelled);
                 }
                 Some(_) => continue,
             },
@@ -1250,12 +1498,12 @@ async fn wait_transfer_response(
 /// Waits for `ready` after an accepted response.
 ///
 /// A deadline or peer cancellation before any DATA sends a `transfer_cancel`
-/// and returns `false`; the session stays authorized.
+/// and returns `Ended`; the session stays authorized.
 async fn wait_ready(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
     deadline: Instant,
-) -> FlowResult<bool> {
+) -> FlowResult<ReadyDecision> {
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -1263,6 +1511,9 @@ async fn wait_ready(
                 Some(ConnectionCommand::Close(code)) => {
                     connection.close_code = Some(code);
                     return Err(FlowOutcome::SessionEnded);
+                }
+                Some(ConnectionCommand::CancelTransfer) => {
+                    return Ok(ReadyDecision::Cancelled);
                 }
                 Some(_) => continue,
             },
@@ -1273,13 +1524,13 @@ async fn wait_ready(
                             code: CancelCode::UserCancelled,
                         }))
                         .await;
-                    return Ok(false);
+                    return Ok(ReadyDecision::Ended);
                 }
                 Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
                     send_actions(connection, &inbound.actions).await?;
                     match inbound.control {
-                        Control::Ready => return Ok(true),
-                        Control::TransferCancel(_) => return Ok(false),
+                        Control::Ready => return Ok(ReadyDecision::Ready),
+                        Control::TransferCancel(_) => return Ok(ReadyDecision::Ended),
                         _ => continue,
                     }
                 }
@@ -1440,40 +1691,93 @@ const fn rejection_for(error: StorageError) -> TransferRejection {
     }
 }
 
-/// Streams every reviewed file in manifest order.
+/// Streams every prepared source in manifest order.
 async fn run_sending(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
     events: &EventSender,
-    selection: FileSelection,
+    prepared: PreparedSelection,
     timeouts: SessionTimeouts,
 ) -> FlowResult<()> {
-    let files = u16::try_from(selection.len()).map_err(|_| FlowOutcome::Failed)?;
+    let files = u16::try_from(prepared.files().len()).map_err(|_| FlowOutcome::Failed)?;
+    let sizes: Vec<u64> = prepared.files().iter().map(PreparedFile::size).collect();
+    let mut tracker = ProgressTracker::new(&sizes, files);
     let _ = events.send(AppEvent::TransferStarted).await;
     for index in 0..files {
-        let file = &selection.files()[usize::from(index)];
-        let _ = events.send(progress_event(index, files, 0)).await;
-        if stream_one_file(connection, commands, file, index, timeouts).await? {
-            let _ = events.send(AppEvent::TransferFinished).await;
-            return Ok(());
+        let file = &prepared.files()[usize::from(index)];
+        tracker.begin_file(index, file.size());
+        emit_progress(events, &mut tracker, true);
+        let step = stream_one_file(
+            connection,
+            commands,
+            events,
+            file,
+            index,
+            &mut tracker,
+            timeouts,
+        )
+        .await?;
+        match step {
+            FileStep::Finished => {
+                tracker.finish_file();
+                emit_progress(events, &mut tracker, true);
+                let files = summary_entries(&prepared);
+                let _ = events
+                    .send(AppEvent::TransferCompleted(TransferSummary::new(
+                        TransferDirection::Sent,
+                        files,
+                        None,
+                        connection.peer_name.clone(),
+                        tracker.elapsed(),
+                    )))
+                    .await;
+                return Ok(());
+            }
+            FileStep::Cancelled => {
+                // Only the verified prefix counts; the current file never did.
+                report_cancel(
+                    connection,
+                    events,
+                    &prepared,
+                    usize::from(index),
+                    tracker.elapsed(),
+                    true,
+                )
+                .await;
+                return Err(FlowOutcome::SessionEnded);
+            }
+            FileStep::PeerCancelled => {
+                let summary = cancelled_sent_summary(
+                    connection,
+                    &prepared,
+                    usize::from(index),
+                    tracker.elapsed(),
+                    true,
+                );
+                let _ = events.send(AppEvent::TransferCompleted(summary)).await;
+                return Err(FlowOutcome::SessionEnded);
+            }
+            FileStep::Continue => {}
         }
-        let _ = events.send(progress_event(index, files, file.size())).await;
+        tracker.finish_file();
+        emit_progress(events, &mut tracker, true);
     }
     Err(FlowOutcome::Failed)
 }
 
-/// Streams one reviewed file and waits for its verified result.
+/// Streams one prepared source and waits for its verified result.
 ///
-/// Returns `true` when the result completed the whole transfer. Queuing one
-/// DATA frame is bounded by the progress deadline so a stalled peer closes the
-/// session instead of blocking the sender forever.
+/// Queuing one DATA frame is bounded by the progress deadline so a stalled
+/// peer closes the session instead of blocking the sender forever.
 async fn stream_one_file(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
-    file: &SelectedFile,
+    events: &EventSender,
+    file: &PreparedFile,
     index: u16,
+    tracker: &mut ProgressTracker,
     timeouts: SessionTimeouts,
-) -> FlowResult<bool> {
+) -> FlowResult<FileStep> {
     let (sender, mut receiver) = mpsc::channel(engine::DATA_CHANNEL_CAPACITY);
     let path = file.path().to_owned();
     let size = file.size();
@@ -1487,10 +1791,12 @@ async fn stream_one_file(
                     connection.close_code = Some(code);
                     return Err(FlowOutcome::SessionEnded);
                 }
+                Some(ConnectionCommand::CancelTransfer) => return Ok(FileStep::Cancelled),
                 Some(_) => continue,
             },
             chunk = receiver.recv() => match chunk {
                 Some(chunk) => {
+                    let length = chunk.len() as u64;
                     protocol::send_data(&connection.protocol).map_err(|_| FlowOutcome::Failed)?;
                     // The writer prefers queued DATA, so the file_end queued
                     // after the last chunk can never overtake it.
@@ -1500,7 +1806,10 @@ async fn stream_one_file(
                     )
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            tracker.add(length);
+                            emit_progress(events, tracker, false);
+                        }
                         Ok(Err(_)) => return Err(FlowOutcome::Failed),
                         Err(_) => {
                             report_timeout(connection).await;
@@ -1510,11 +1819,16 @@ async fn stream_one_file(
                 }
                 None => break,
             },
-            result = connection.read() => match result? {
-                None => return Err(FlowOutcome::SessionEnded),
-                // No control and no DATA are valid before this file_end.
-                Some(_) => return Err(FlowOutcome::Failed),
-            },
+            result = connection.read() => {
+                if connection.peer_cancelled() {
+                    return Ok(FileStep::PeerCancelled);
+                }
+                match result? {
+                    None => return Err(FlowOutcome::SessionEnded),
+                    // No control and no DATA are valid before this file_end.
+                    Some(_) => return Err(FlowOutcome::Failed),
+                }
+            }
         }
     }
 
@@ -1549,7 +1863,7 @@ async fn wait_file_result(
     connection: &mut SessionConnection,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
     progress: Duration,
-) -> FlowResult<bool> {
+) -> FlowResult<FileStep> {
     let mut deadline = Instant::now() + progress;
     loop {
         tokio::select! {
@@ -1559,6 +1873,7 @@ async fn wait_file_result(
                     connection.close_code = Some(code);
                     return Err(FlowOutcome::SessionEnded);
                 }
+                Some(ConnectionCommand::CancelTransfer) => return Ok(FileStep::Cancelled),
                 Some(_) => continue,
             },
             result = timeout_at(deadline, connection.read()) => match result {
@@ -1573,15 +1888,24 @@ async fn wait_file_result(
                     send_actions(connection, &inbound.actions).await?;
                     match inbound.control {
                         Control::FileResult(_) => {
-                            return Ok(inbound
+                            if inbound
                                 .actions
-                                .contains(&ProtocolAction::TransferFinished));
+                                .contains(&ProtocolAction::TransferFinished)
+                            {
+                                return Ok(FileStep::Finished);
+                            }
+                            return Ok(FileStep::Continue);
                         }
-                        Control::TransferCancel(_) => return Err(FlowOutcome::SessionEnded),
+                        Control::TransferCancel(_) => return Ok(FileStep::PeerCancelled),
                         _ => continue,
                     }
                 }
-                Ok(Err(outcome)) => return Err(outcome),
+                Ok(Err(outcome)) => {
+                    if connection.peer_cancelled() {
+                        return Ok(FileStep::PeerCancelled);
+                    }
+                    return Err(outcome);
+                }
             },
         }
     }
@@ -1601,8 +1925,11 @@ async fn run_receiving(
     timeouts: SessionTimeouts,
 ) -> FlowResult<()> {
     let files = u16::try_from(request.files.len()).map_err(|_| FlowOutcome::Failed)?;
+    let sizes: Vec<u64> = request.files.iter().map(|entry| entry.size).collect();
+    let mut tracker = ProgressTracker::new(&sizes, files);
     let _ = events.send(AppEvent::TransferStarted).await;
-    let _ = events.send(progress_event(0, files, 0)).await;
+    tracker.begin_file(0, sizes[0]);
+    emit_progress(events, &mut tracker, true);
     let mut index = 0u16;
     let mut deadline = Instant::now() + timeouts.progress;
     loop {
@@ -1611,6 +1938,24 @@ async fn run_receiving(
                 None => return Err(FlowOutcome::SessionEnded),
                 Some(ConnectionCommand::Close(code)) => {
                     connection.close_code = Some(code);
+                    return Err(FlowOutcome::SessionEnded);
+                }
+                Some(ConnectionCommand::CancelTransfer) => {
+                    let _ = connection
+                        .send_control(&Control::TransferCancel(TransferCancel {
+                            code: CancelCode::UserCancelled,
+                        }))
+                        .await;
+                    let _ = events
+                        .send(AppEvent::TransferCompleted(cancelled_received_summary(
+                            connection,
+                            &request,
+                            &destination,
+                            usize::from(index),
+                            tracker.elapsed(),
+                        )))
+                        .await;
+                    // Dropping `incoming` removes the current partial file.
                     return Err(FlowOutcome::SessionEnded);
                 }
                 Some(_) => continue,
@@ -1623,11 +1968,14 @@ async fn run_receiving(
                 Ok(Ok(None)) => return Err(FlowOutcome::SessionEnded),
                 Ok(Ok(Some(InboundMessage::Data(chunk)))) => {
                     deadline = Instant::now() + timeouts.progress;
+                    let length = chunk.len() as u64;
                     if incoming.write(&chunk).await.is_err() {
                         // The partial file is removed when it is dropped.
                         report_internal_error(connection).await;
                         return Err(FlowOutcome::SessionEnded);
                     }
+                    tracker.add(length);
+                    emit_progress(events, &mut tracker, false);
                 }
                 Ok(Ok(Some(InboundMessage::Control(inbound)))) => {
                     deadline = Instant::now() + timeouts.progress;
@@ -1636,7 +1984,6 @@ async fn run_receiving(
                             if file_end.index != index {
                                 return Err(FlowOutcome::Failed);
                             }
-                            let finished_size = request.files[usize::from(index)].size;
                             match incoming.finish(file_end.sha256).await {
                                 Ok(()) => {
                                     let actions = connection
@@ -1644,8 +1991,20 @@ async fn run_receiving(
                                             FileResult::verified(index),
                                         ))
                                         .await?;
+                                    tracker.finish_file();
+                                    emit_progress(events, &mut tracker, true);
                                     if actions.contains(&ProtocolAction::TransferFinished) {
-                                        let _ = events.send(AppEvent::TransferFinished).await;
+                                        let _ = events
+                                            .send(AppEvent::TransferCompleted(
+                                                TransferSummary::new(
+                                                    TransferDirection::Received,
+                                                    request.files.clone(),
+                                                    Some(destination.root().to_path_buf()),
+                                                    connection.peer_name.clone(),
+                                                    tracker.elapsed(),
+                                                ),
+                                            ))
+                                            .await;
                                         return Ok(());
                                     }
                                 }
@@ -1660,9 +2019,6 @@ async fn run_receiving(
                                     return Err(FlowOutcome::SessionEnded);
                                 }
                             }
-                            let _ = events
-                                .send(progress_event(index, files, finished_size))
-                                .await;
                             index += 1;
                             let entry = &request.files[usize::from(index)];
                             incoming = match IncomingFile::begin(&destination, entry).await {
@@ -1672,13 +2028,38 @@ async fn run_receiving(
                                     return Err(FlowOutcome::SessionEnded);
                                 }
                             };
-                            let _ = events.send(progress_event(index, files, 0)).await;
+                            tracker.begin_file(index, entry.size);
+                            emit_progress(events, &mut tracker, true);
                         }
-                        Control::TransferCancel(_) => return Err(FlowOutcome::SessionEnded),
+                        Control::TransferCancel(_) => {
+                            let _ = events
+                                .send(AppEvent::TransferCompleted(cancelled_received_summary(
+                                    connection,
+                                    &request,
+                                    &destination,
+                                    usize::from(index),
+                                    tracker.elapsed(),
+                                )))
+                                .await;
+                            return Err(FlowOutcome::SessionEnded);
+                        }
                         _ => continue,
                     }
                 }
-                Ok(Err(outcome)) => return Err(outcome),
+                Ok(Err(outcome)) => {
+                    if connection.peer_cancelled() {
+                        let _ = events
+                            .send(AppEvent::TransferCompleted(cancelled_received_summary(
+                                connection,
+                                &request,
+                                &destination,
+                                usize::from(index),
+                                tracker.elapsed(),
+                            )))
+                            .await;
+                    }
+                    return Err(outcome);
+                }
             },
         }
     }
@@ -1715,13 +2096,86 @@ async fn send_actions(
     Ok(())
 }
 
-/// Builds one per-file progress event.
-fn progress_event(index: u16, files: u16, transferred: u64) -> AppEvent {
-    AppEvent::TransferProgress(TransferProgress {
-        index,
-        files,
-        transferred,
-    })
+/// How often mid-file progress is reported.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Tracks per-file and overall byte progress for one active transfer.
+///
+/// Progress is reported as a snapshot; the view derives speed and time left
+/// from `elapsed` so the session never has to smooth numbers itself.
+struct ProgressTracker {
+    started: Instant,
+    files: u16,
+    index: u16,
+    file_size: u64,
+    total_size: u64,
+    completed: u64,
+    transferred: u64,
+    last_emit: Instant,
+}
+
+impl ProgressTracker {
+    /// Creates a tracker for the declared manifest sizes.
+    fn new(sizes: &[u64], files: u16) -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            files,
+            index: 0,
+            file_size: 0,
+            total_size: sizes.iter().copied().sum(),
+            completed: 0,
+            transferred: 0,
+            last_emit: now,
+        }
+    }
+
+    /// Starts a manifest entry, resetting the per-file counter.
+    fn begin_file(&mut self, index: u16, size: u64) {
+        self.index = index;
+        self.file_size = size;
+        self.transferred = 0;
+    }
+
+    /// Adds bytes read or written for the current file.
+    fn add(&mut self, bytes: u64) {
+        self.transferred = self.transferred.saturating_add(bytes);
+    }
+
+    /// Moves the current file's bytes into the completed total.
+    fn finish_file(&mut self) {
+        self.completed = self.completed.saturating_add(self.transferred);
+    }
+
+    /// Returns the time since the transfer started.
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Returns a progress snapshot, emitting at most once per interval.
+    fn should_emit(&mut self, force: bool) -> Option<TransferProgress> {
+        let now = Instant::now();
+        if !force && now.duration_since(self.last_emit) < PROGRESS_INTERVAL {
+            return None;
+        }
+        self.last_emit = now;
+        Some(TransferProgress {
+            index: self.index,
+            files: self.files,
+            file_size: self.file_size,
+            transferred: self.transferred,
+            total_size: self.total_size,
+            total_transferred: self.completed.saturating_add(self.transferred),
+            elapsed: self.started.elapsed(),
+        })
+    }
+}
+
+/// Reports progress without ever blocking the data path.
+fn emit_progress(events: &EventSender, tracker: &mut ProgressTracker, force: bool) {
+    if let Some(progress) = tracker.should_emit(force) {
+        let _ = events.try_send(AppEvent::TransferProgress(progress));
+    }
 }
 
 #[cfg(test)]
@@ -1745,8 +2199,9 @@ mod tests {
     use crate::framing::Frame;
     use crate::pairing::PairingCode;
     use crate::protocol::{
-        CloseCode, Control, ErrorCode, ErrorMessage, FileEntry, Hello, PairRejection,
-        PairingRecord, PairingStep, Phase, TransferRejection, TransferRequest, TransferResponse,
+        CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEntry, Hello, PairRejection,
+        PairingRecord, PairingStep, Phase, TransferCancel, TransferRejection, TransferRequest,
+        TransferResponse,
     };
     use crate::transfer::selection::FileSelection;
     use crate::transport::{FramedConnection, Outbound, TlsHandshake};
@@ -2306,12 +2761,16 @@ mod tests {
         ));
     }
 
-    /// Waits until the transfer finishes.
-    async fn wait_finished(events: &mut EventReceiver) {
-        assert!(matches!(
-            next_matching(events, |event| matches!(event, AppEvent::TransferFinished)).await,
-            AppEvent::TransferFinished
-        ));
+    /// Waits until the transfer finishes and returns the summary.
+    async fn wait_finished(events: &mut EventReceiver) -> crate::app::model::TransferSummary {
+        let AppEvent::TransferCompleted(summary) = next_matching(events, |event| {
+            matches!(event, AppEvent::TransferCompleted(_))
+        })
+        .await
+        else {
+            unreachable!("the predicate only matches summaries");
+        };
+        summary
     }
 
     /// Waits for the next inbound proposal and returns its file names.
@@ -2403,6 +2862,48 @@ mod tests {
             b"report body"
         );
 
+        // A folder is compressed into one zip archive before the request.
+        let folder = source.join("docs");
+        std::fs::create_dir_all(folder.join("nested")).unwrap();
+        std::fs::write(folder.join("one.txt"), b"12345").unwrap();
+        std::fs::write(folder.join("nested/two.txt"), b"678").unwrap();
+        let folder_destination = temp_root("folder-destination");
+        responder
+            .send(SessionCommand::StartTransfer(selection(&[&folder])))
+            .await
+            .unwrap();
+        let AppEvent::IncomingTransferRequest(proposal) =
+            next_matching(&mut initiator_events, |event| {
+                matches!(event, AppEvent::IncomingTransferRequest(_))
+            })
+            .await
+        else {
+            unreachable!("the predicate only matches proposals");
+        };
+        assert_eq!(proposal.files().len(), 1);
+        let entry = &proposal.files()[0];
+        assert_eq!(entry.name, "docs.zip");
+        let folder_meta = entry.folder.unwrap();
+        assert_eq!(folder_meta.items, 3);
+        assert_eq!(folder_meta.source_size, 8);
+        initiator
+            .send(SessionCommand::AcceptTransfer(folder_destination.clone()))
+            .await
+            .unwrap();
+        wait_started(&mut initiator_events).await;
+        wait_started(&mut responder_events).await;
+        wait_finished(&mut responder_events).await;
+        wait_finished(&mut initiator_events).await;
+        let received = folder_destination.join("docs.zip");
+        assert!(received.exists());
+        let file = std::fs::File::open(&received).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names: Vec<String> = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["nested/", "nested/two.txt", "one.txt"]);
+
         // A rejection before ready keeps the session open for another try.
         let retry = selection(&[&report]);
         initiator
@@ -2453,10 +2954,85 @@ mod tests {
             source,
             first_destination,
             reverse_destination,
+            folder_destination,
             retry_destination,
         ] {
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[tokio::test]
+    async fn a_local_cancel_before_ready_reports_a_summary_and_keeps_the_session() {
+        let source = temp_root("cancel-source");
+        let destination = temp_root("cancel-destination");
+        let report = source.join("report.txt");
+        std::fs::write(&report, b"report body").unwrap();
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let (initiator, mut initiator_events) = initiator_under_test(test_timeouts()).await;
+        pair_services(
+            &initiator,
+            &mut initiator_events,
+            &responder,
+            &mut responder_events,
+            address,
+        )
+        .await;
+
+        initiator
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("report.txt".to_owned(), 11)]
+        );
+
+        // The initiator cancels before the responder decides.
+        initiator
+            .send(SessionCommand::CancelTransfer)
+            .await
+            .unwrap();
+        let summary = wait_finished(&mut initiator_events).await;
+        assert!(summary.cancelled);
+        assert!(!summary.session_closed);
+        assert!(summary.files.is_empty());
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::ProposalRejected
+            ))
+            .await,
+            AppEvent::ProposalRejected
+        ));
+
+        // The same session still carries another transfer.
+        initiator
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_proposal(&mut responder_events).await,
+            [("report.txt".to_owned(), 11)]
+        );
+        responder
+            .send(SessionCommand::AcceptTransfer(destination.clone()))
+            .await
+            .unwrap();
+        wait_started(&mut initiator_events).await;
+        wait_started(&mut responder_events).await;
+        wait_finished(&mut initiator_events).await;
+        wait_finished(&mut responder_events).await;
+        assert_eq!(
+            std::fs::read(destination.join("report.txt")).unwrap(),
+            b"report body"
+        );
+
+        responder.stop().await;
+        initiator.stop().await;
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&destination);
     }
 
     /// Reads one frame from a raw test peer before the test deadline.
@@ -2607,11 +3183,7 @@ mod tests {
         // request and reviews the incoming manifest.
         outbound
             .send_control(&Control::TransferRequest(
-                TransferRequest::new(vec![FileEntry {
-                    name: "incoming.bin".to_owned(),
-                    size: 3,
-                }])
-                .unwrap(),
+                TransferRequest::new(vec![FileEntry::new("incoming.bin".to_owned(), 3)]).unwrap(),
             ))
             .await
             .unwrap();
@@ -2807,11 +3379,7 @@ mod tests {
         // DATA ever arrives.
         outbound
             .send_control(&Control::TransferRequest(
-                TransferRequest::new(vec![FileEntry {
-                    name: "stalled.bin".to_owned(),
-                    size: 4,
-                }])
-                .unwrap(),
+                TransferRequest::new(vec![FileEntry::new("stalled.bin".to_owned(), 4)]).unwrap(),
             ))
             .await
             .unwrap();
@@ -2913,6 +3481,277 @@ mod tests {
             AppEvent::SessionClosed
         ));
         assert!(peer.read_frame().await.unwrap().is_none());
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(source);
+    }
+
+    #[tokio::test]
+    async fn a_local_cancel_during_transfer_reports_a_closed_summary() {
+        let source = temp_root("cancel-active-source");
+        let report = source.join("report.txt");
+        std::fs::write(&report, b"report body").unwrap();
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        // The local side sends one file to a raw peer that never answers with
+        // `file_result`, leaving the sender waiting for the verified result.
+        responder
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferRequest(_)
+        ));
+        outbound
+            .send_control(&Control::TransferResponse(TransferResponse::accepted()))
+            .await
+            .unwrap();
+        outbound.send_control(&Control::Ready).await.unwrap();
+        loop {
+            match raw_frame(&mut peer).await {
+                Frame::Data(_) => continue,
+                Frame::Control(body) => match Control::decode(&body) {
+                    Ok(Control::FileEnd(_)) => break,
+                    Ok(_) => continue,
+                    Err(_) => panic!("the file stream carries valid controls"),
+                },
+            }
+        }
+
+        // Cancelling sends `transfer_cancel` and closes the session after a
+        // cancelled summary.
+        responder
+            .send(SessionCommand::CancelTransfer)
+            .await
+            .unwrap();
+        let Frame::Control(body) = raw_frame(&mut peer).await else {
+            panic!("the cancel must arrive as a control frame");
+        };
+        assert!(matches!(
+            Control::decode(&body),
+            Ok(Control::TransferCancel(cancel)) if cancel.code == CancelCode::UserCancelled
+        ));
+
+        let AppEvent::TransferCompleted(summary) = next_matching(&mut responder_events, |event| {
+            matches!(event, AppEvent::TransferCompleted(_))
+        })
+        .await
+        else {
+            unreachable!("the predicate only matches summaries");
+        };
+        assert!(summary.cancelled);
+        assert!(summary.session_closed);
+        assert!(summary.files.is_empty());
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+        assert!(peer.read_frame().await.unwrap().is_none());
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(source);
+    }
+
+    #[tokio::test]
+    async fn a_peer_cancel_after_file_end_reports_a_closed_summary_to_the_sender() {
+        let source = temp_root("peer-cancel-sender-source");
+        let report = source.join("report.txt");
+        std::fs::write(&report, b"report body").unwrap();
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        responder
+            .send(SessionCommand::StartTransfer(selection(&[&report])))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferRequest(_)
+        ));
+        outbound
+            .send_control(&Control::TransferResponse(TransferResponse::accepted()))
+            .await
+            .unwrap();
+        outbound.send_control(&Control::Ready).await.unwrap();
+        loop {
+            match raw_frame(&mut peer).await {
+                Frame::Data(_) => continue,
+                Frame::Control(body) => match Control::decode(&body) {
+                    Ok(Control::FileEnd(_)) => break,
+                    Ok(_) => continue,
+                    Err(_) => panic!("the file stream carries valid controls"),
+                },
+            }
+        }
+
+        // The peer cancels instead of verifying the file; the local side still
+        // reports the cancelled transfer even though it never saw the result.
+        outbound
+            .send_control(&Control::TransferCancel(TransferCancel {
+                code: CancelCode::UserCancelled,
+            }))
+            .await
+            .unwrap();
+
+        let AppEvent::TransferCompleted(summary) = next_matching(&mut responder_events, |event| {
+            matches!(event, AppEvent::TransferCompleted(_))
+        })
+        .await
+        else {
+            unreachable!("the predicate only matches summaries");
+        };
+        assert!(summary.cancelled);
+        assert!(summary.session_closed);
+        assert!(summary.files.is_empty());
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(source);
+    }
+
+    #[tokio::test]
+    async fn a_peer_cancel_while_receiving_reports_a_closed_summary_and_removes_the_partial() {
+        let destination = temp_root("peer-cancel-receiver-destination");
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        // The raw peer proposes one file; the app accepts and starts receiving.
+        outbound
+            .send_control(&Control::TransferRequest(
+                TransferRequest::new(vec![FileEntry::new("incoming.bin".to_owned(), 64)]).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::IncomingTransferRequest(_)
+            ))
+            .await,
+            AppEvent::IncomingTransferRequest(_)
+        ));
+        responder
+            .send(SessionCommand::AcceptTransfer(destination.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferResponse(response) if response.accepted
+        ));
+        assert!(matches!(raw_control(&mut peer).await, Control::Ready));
+        wait_started(&mut responder_events).await;
+
+        // Some bytes arrive, then the peer cancels mid-file.
+        outbound
+            .send_data(Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        outbound
+            .send_control(&Control::TransferCancel(TransferCancel {
+                code: CancelCode::UserCancelled,
+            }))
+            .await
+            .unwrap();
+
+        let AppEvent::TransferCompleted(summary) = next_matching(&mut responder_events, |event| {
+            matches!(event, AppEvent::TransferCompleted(_))
+        })
+        .await
+        else {
+            unreachable!("the predicate only matches summaries");
+        };
+        assert!(summary.cancelled);
+        assert!(summary.session_closed);
+        assert!(summary.files.is_empty());
+        assert_eq!(summary.destination.as_deref(), Some(destination.as_path()));
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+
+        // The current partial is removed; nothing was finalized.
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+        assert!(!destination.join("incoming.bin").exists());
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_folder_preparation_sends_no_request_and_reports_a_summary() {
+        let source = temp_root("prep-cancel-source");
+        let folder = source.join("big");
+        std::fs::create_dir_all(&folder).unwrap();
+        // Enough entries that the archive cannot finish before the cancel is
+        // routed through the manager.
+        for index in 0..1_500u32 {
+            std::fs::write(folder.join(format!("f{index:04}.bin")), [b'x'; 256]).unwrap();
+        }
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, _outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        responder
+            .send(SessionCommand::StartTransfer(selection(&[&folder])))
+            .await
+            .unwrap();
+        responder
+            .send(SessionCommand::CancelTransfer)
+            .await
+            .unwrap();
+
+        let summary = wait_finished(&mut responder_events).await;
+        assert!(summary.cancelled);
+        assert!(!summary.session_closed);
+        assert!(summary.files.is_empty());
+
+        // The request was never sent, so the peer must stay silent.
+        assert!(
+            timeout(Duration::from_millis(200), peer.read_frame())
+                .await
+                .is_err(),
+            "the cancelled proposal must not reach the peer"
+        );
 
         responder.stop().await;
         let _ = std::fs::remove_dir_all(source);

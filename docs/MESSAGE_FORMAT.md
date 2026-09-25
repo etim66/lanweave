@@ -69,7 +69,11 @@ Exactly four records occur after an accepted `pair_response`: initiator Party A 
 {"type":"transfer_request","files":[{"name":"report.pdf","size":1048576},{"name":"empty.txt","size":0}]}
 ```
 
-`files` contains 1 through 1,024 entries. Each entry contains only `name` and `size`. `name` is a filename component, not a path. Array order is transfer order. The request is immutable after it is sent.
+```json
+{"type":"transfer_request","files":[{"name":"docs.zip","size":1234,"kind":"folder","items":42,"source_size":987654}]}
+```
+
+`files` contains 1 through 1,024 entries. Each entry contains `name` and `size`. `kind`, `items`, and `source_size` are optional folder metadata: `kind` is `folder`, `items` counts the files and directories inside the folder, and `source_size` is the uncompressed regular-file total. The fields are required together for a folder archive and forbidden on a regular file; an absent `kind` means a regular file. `name` is a filename component, not a path. Array order is transfer order. The request is immutable after it is sent.
 
 ### `transfer_response`
 

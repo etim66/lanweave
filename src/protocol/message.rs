@@ -269,11 +269,63 @@ impl PairingRecord {
     }
 }
 
-/// One manifest entry: a filename component and its exact byte size.
+/// Optional folder-archive metadata on one manifest entry.
+///
+/// The entry name is the zip archive name and `size` is the zip's byte size;
+/// `items` and `source_size` describe the folder before compression and are
+/// untrusted display hints for the recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FolderMeta {
+    /// Always the fixed `folder` wire marker.
+    pub kind: FolderKind,
+    /// Number of files and directories inside the folder.
+    pub items: u64,
+    /// Total uncompressed size of the folder's regular files.
+    pub source_size: u64,
+}
+
+/// The fixed wire marker carried by [`FolderMeta`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderKind {
+    Folder,
+}
+
+/// One manifest entry: a filename component, its exact wire size, and
+/// optional folder-archive metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileEntry {
     pub name: String,
     pub size: u64,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<FolderMeta>,
+}
+
+impl FileEntry {
+    /// Builds a regular-file entry without folder metadata.
+    pub fn new(name: String, size: u64) -> Self {
+        Self {
+            name,
+            size,
+            folder: None,
+        }
+    }
+
+    /// Builds a folder-archive entry.
+    ///
+    /// `size` is the zip's byte size; `items` and `source_size` describe the
+    /// folder before compression.
+    pub fn folder(name: String, size: u64, items: u64, source_size: u64) -> Self {
+        Self {
+            name,
+            size,
+            folder: Some(FolderMeta {
+                kind: FolderKind::Folder,
+                items,
+                source_size,
+            }),
+        }
+    }
 }
 
 /// `transfer_request`: the immutable ordered manifest proposal.
@@ -512,10 +564,12 @@ impl Control {
             let name = entry.required_str("name")?;
             validate_filename(&name)?;
             let size = entry.required_uint("size", MAX_INTEGER)?;
-            entry.finish(&["name", "size"])?;
+            let folder = decode_folder(&entry)?;
+            entry.finish(&["name", "size", "kind", "items", "source_size"])?;
             files.push(FileEntry {
                 name: name.into_owned(),
                 size,
+                folder,
             });
         }
         let request =
@@ -632,6 +686,27 @@ fn decode_sha256(encoded: &str) -> Result<[u8; 32], MessageError> {
     Ok(digest)
 }
 
+/// Decodes optional folder-archive metadata from one manifest entry.
+///
+/// `kind` is optional and defaults to a regular file; folder entries must
+/// carry both `items` and `source_size`, and file entries must not.
+fn decode_folder(entry: &StrictObject<'_>) -> Result<Option<FolderMeta>, MessageError> {
+    match entry.optional_str("kind")?.as_deref() {
+        None | Some("file") => {
+            if entry.contains("items") || entry.contains("source_size") {
+                return Err(MessageError::InvalidValue { field: "kind" });
+            }
+            Ok(None)
+        }
+        Some("folder") => Ok(Some(FolderMeta {
+            kind: FolderKind::Folder,
+            items: entry.required_uint("items", MAX_INTEGER)?,
+            source_size: entry.required_uint("source_size", MAX_INTEGER)?,
+        })),
+        Some(_) => Err(MessageError::InvalidValue { field: "kind" }),
+    }
+}
+
 /// Rejects names that are not single bounded filename components.
 fn validate_filename(name: &str) -> Result<(), MessageError> {
     if is_valid_filename(name) {
@@ -730,8 +805,8 @@ mod tests {
                 "{\"type\":\"transfer_request\",\"files\":[{\"name\":\"report.pdf\",\"size\":1048576},{\"name\":\"empty.txt\",\"size\":0}]}".to_owned(),
                 Control::TransferRequest(
                     TransferRequest::new(vec![
-                        FileEntry { name: "report.pdf".to_owned(), size: 1_048_576 },
-                        FileEntry { name: "empty.txt".to_owned(), size: 0 },
+                        FileEntry::new("report.pdf".to_owned(), 1_048_576),
+                        FileEntry::new("empty.txt".to_owned(), 0),
                     ])
                     .unwrap(),
                 ),
@@ -739,10 +814,19 @@ mod tests {
             (
                 "{\"type\":\"transfer_request\",\"files\":[{\"name\":\"big.bin\",\"size\":9007199254740991}]}".to_owned(),
                 Control::TransferRequest(
-                    TransferRequest::new(vec![FileEntry {
-                        name: "big.bin".to_owned(),
-                        size: MAX_INTEGER,
-                    }])
+                    TransferRequest::new(vec![FileEntry::new("big.bin".to_owned(), MAX_INTEGER)])
+                        .unwrap(),
+                ),
+            ),
+            (
+                "{\"type\":\"transfer_request\",\"files\":[{\"name\":\"docs.zip\",\"size\":1234,\"kind\":\"folder\",\"items\":42,\"source_size\":987654}]}".to_owned(),
+                Control::TransferRequest(
+                    TransferRequest::new(vec![FileEntry::folder(
+                        "docs.zip".to_owned(),
+                        1_234,
+                        42,
+                        987_654,
+                    )])
                     .unwrap(),
                 ),
             ),
@@ -801,10 +885,7 @@ mod tests {
     #[test]
     fn full_manifest_round_trips() {
         let files: Vec<FileEntry> = (0..usize::from(MAX_FILES))
-            .map(|index| FileEntry {
-                name: format!("f{index:04}"),
-                size: 1,
-            })
+            .map(|index| FileEntry::new(format!("f{index:04}"), 1))
             .collect();
         let control = Control::TransferRequest(TransferRequest::new(files).unwrap());
 
@@ -829,6 +910,9 @@ mod tests {
             "{{\"type\":\"hello\",\"version\":1,\"display_name\":\"{}\"}}",
             "x".repeat(129)
         );
+        let folder_without_items = "{\"type\":\"transfer_request\",\"files\":[{\"name\":\"docs.zip\",\"size\":1,\"kind\":\"folder\"}]}".to_owned();
+        let folder_without_size = "{\"type\":\"transfer_request\",\"files\":[{\"name\":\"docs.zip\",\"size\":1,\"kind\":\"folder\",\"items\":2}]}".to_owned();
+        let file_with_folder_fields = "{\"type\":\"transfer_request\",\"files\":[{\"name\":\"a.txt\",\"size\":1,\"items\":2,\"source_size\":3}]}".to_owned();
 
         let cases: Vec<(String, MessageError)> = vec![
             // Duplicate fields fail before their values are inspected.
@@ -898,6 +982,12 @@ mod tests {
                 MessageError::InvalidValue { field: "version" },
             ),
             (display_name_129, MessageError::InvalidValue { field: "display_name" }),
+            (folder_without_items, MessageError::MissingField("items")),
+            (folder_without_size, MessageError::MissingField("source_size")),
+            (
+                file_with_folder_fields,
+                MessageError::InvalidValue { field: "kind" },
+            ),
             (
                 "{\"type\":\"pair_response\",\"accepted\":true,\"reason\":\"user_rejected\"}"
                     .to_owned(),

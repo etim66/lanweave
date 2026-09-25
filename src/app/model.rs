@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::action::{ConnectionTarget, DeviceId, PairingPeer};
 use super::failure::FailureKind;
@@ -14,6 +15,9 @@ use crate::transfer::selection::FileSelection;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Starting,
+    /// The primary screen after startup: a quiet landing card that points at
+    /// `/devices` and `/send` instead of opening the device list immediately.
+    Home,
     Browsing,
     /// A connection is being established or a `pair_request` awaits response.
     PairingOutbound,
@@ -32,6 +36,8 @@ pub enum AppState {
     InboundProposalAccepted,
     TransferringOutbound,
     TransferringInbound,
+    /// A finished transfer summary is shown until the user dismisses it.
+    TransferComplete,
     ClosingSession,
     Error(FailureKind),
     ShuttingDown,
@@ -40,8 +46,9 @@ pub enum AppState {
 impl AppState {
     /// Every state, for exhaustive test coverage.
     #[cfg(test)]
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::Starting,
+        Self::Home,
         Self::Browsing,
         Self::PairingOutbound,
         Self::PairingOutboundAccepted,
@@ -55,6 +62,7 @@ impl AppState {
         Self::InboundProposalAccepted,
         Self::TransferringOutbound,
         Self::TransferringInbound,
+        Self::TransferComplete,
         Self::ClosingSession,
         Self::Error(FailureKind::Internal),
         Self::ShuttingDown,
@@ -83,6 +91,7 @@ impl AppState {
                 | Self::InboundProposalAccepted
                 | Self::TransferringOutbound
                 | Self::TransferringInbound
+                | Self::TransferComplete
                 | Self::ClosingSession
         )
     }
@@ -95,7 +104,8 @@ impl AppState {
     /// Returns whether the user may start a disconnect from this state.
     pub const fn can_disconnect(self) -> bool {
         (self.is_pairing() && !matches!(self, Self::ClosingPairing))
-            || (self.has_session() && !matches!(self, Self::ClosingSession))
+            || (self.has_session()
+                && !matches!(self, Self::ClosingSession | Self::TransferComplete))
     }
 }
 
@@ -103,10 +113,16 @@ impl AppState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppCapabilities {
     pub(crate) accepts_commands: bool,
+    /// `/devices` and `/connect` can start the device-selection flow.
+    pub(crate) can_open_devices: bool,
+    /// The device list is on screen and responds to up/down and enter.
     pub(crate) can_show_devices: bool,
+    /// `/home` and Escape can return to the home screen.
+    pub(crate) can_show_home: bool,
     /// The file review list can be opened and kept on screen.
     pub(crate) can_review_files: bool,
     pub(crate) can_start_transfer: bool,
+    pub(crate) can_cancel_transfer: bool,
     pub(crate) transfer_unavailable: bool,
     pub(crate) session_closing: bool,
     pub(crate) can_disconnect: bool,
@@ -120,6 +136,7 @@ pub(crate) struct AppCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Starting,
+    Home,
     Browsing,
     Pairing,
     Session,
@@ -133,6 +150,7 @@ impl From<AppState> for Screen {
     fn from(state: AppState) -> Self {
         match state {
             AppState::Starting => Self::Starting,
+            AppState::Home => Self::Home,
             AppState::Browsing => Self::Browsing,
             AppState::PairingOutbound
             | AppState::PairingOutboundAccepted
@@ -145,7 +163,8 @@ impl From<AppState> for Screen {
             | AppState::InboundProposal
             | AppState::InboundProposalAccepted
             | AppState::TransferringOutbound
-            | AppState::TransferringInbound => Self::Transfer,
+            | AppState::TransferringInbound
+            | AppState::TransferComplete => Self::Transfer,
             AppState::Error(_) => Self::Error,
             AppState::ShuttingDown => Self::Shutdown,
         }
@@ -189,15 +208,92 @@ impl TransferProposal {
     }
 }
 
-/// Per-file progress of the active transfer.
+/// Per-file and overall progress of the active transfer.
 ///
 /// `index` is the zero-based manifest index of the file being moved and
-/// `transferred` is the byte count already handled for that file.
+/// `transferred` is the byte count already handled for that file. The totals
+/// let the view render overall and per-file progress without extra lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransferProgress {
     pub(crate) index: u16,
     pub(crate) files: u16,
+    pub(crate) file_size: u64,
     pub(crate) transferred: u64,
+    pub(crate) total_size: u64,
+    pub(crate) total_transferred: u64,
+    pub(crate) elapsed: Duration,
+}
+
+/// Folder compression progress before an outbound manifest is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransferPreparation {
+    /// The zip entry being built, for display.
+    pub(crate) name: String,
+    /// Zero-based manifest index of the archive being built.
+    pub(crate) index: u16,
+    /// Total manifest entries.
+    pub(crate) files: u16,
+    /// Folder entries compressed so far.
+    pub(crate) items_done: u64,
+    /// Total folder entries to compress.
+    pub(crate) items_total: u64,
+}
+
+/// Which side of the completed transfer a summary describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferDirection {
+    Sent,
+    Received,
+}
+
+/// The result of one finished transfer, shown to both participants.
+///
+/// The summary never contains local source paths; only wire manifest names and
+/// the recipient's chosen destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransferSummary {
+    pub(crate) direction: TransferDirection,
+    pub(crate) files: Vec<FileEntry>,
+    pub(crate) total_size: u64,
+    /// The recipient's save directory; `None` on the sender side.
+    pub(crate) destination: Option<PathBuf>,
+    /// The escaped, untrusted peer display name.
+    pub(crate) peer: Option<String>,
+    pub(crate) duration: Duration,
+    /// Whether the session ended as part of the completion or cancellation.
+    pub(crate) session_closed: bool,
+    /// Whether the transfer was cancelled instead of completed.
+    pub(crate) cancelled: bool,
+}
+
+impl TransferSummary {
+    /// Builds a completed summary with the checked total and duration.
+    pub(crate) fn new(
+        direction: TransferDirection,
+        files: Vec<FileEntry>,
+        destination: Option<PathBuf>,
+        peer: Option<String>,
+        duration: Duration,
+    ) -> Self {
+        let total_size = files.iter().map(|entry| entry.size).sum();
+        Self {
+            direction,
+            files,
+            total_size,
+            destination,
+            peer: peer.map(|name| escape_display(&name)),
+            duration,
+            session_closed: false,
+            cancelled: false,
+        }
+    }
+
+    /// Marks the summary as cancelled, recording whether the session closed.
+    pub(crate) fn cancelled(mut self, session_closed: bool) -> Self {
+        self.cancelled = true;
+        self.session_closed = session_closed;
+        self
+    }
 }
 
 /// State owned exclusively by the application event loop.
@@ -206,12 +302,19 @@ pub struct AppModel {
     state: AppState,
     candidates: CandidateStore,
     pairing_peer: Option<PairingPeer>,
+    session_peer: Option<PairingPeer>,
     pairing_code: Option<PairingCode>,
     transfer_proposal: Option<TransferProposal>,
     outbound_selection: Option<FileSelection>,
     deferred_selection: Option<FileSelection>,
     transfer_progress: Option<TransferProgress>,
+    preparation: Option<TransferPreparation>,
+    summary: Option<TransferSummary>,
+    /// A local transfer problem shown on the authorized-idle screen.
+    transfer_notice: Option<&'static str>,
     default_destination: PathBuf,
+    /// The directory Lanweave was started in; shown for orientation only.
+    working_directory: PathBuf,
 }
 
 impl AppModel {
@@ -220,16 +323,22 @@ impl AppModel {
     /// The default destination is the directory Lanweave was started in; the
     /// recipient can replace it for every inbound transfer.
     pub fn new() -> Self {
+        let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             state: AppState::Starting,
             candidates: CandidateStore::new(),
             pairing_peer: None,
+            session_peer: None,
             pairing_code: None,
             transfer_proposal: None,
             outbound_selection: None,
             deferred_selection: None,
             transfer_progress: None,
-            default_destination: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            preparation: None,
+            summary: None,
+            transfer_notice: None,
+            default_destination: working_directory.clone(),
+            working_directory,
         }
     }
 
@@ -241,6 +350,14 @@ impl AppModel {
     /// Returns the peer shown on a pairing prompt or code screen.
     pub(crate) fn pairing_peer(&self) -> Option<&PairingPeer> {
         self.pairing_peer.as_ref()
+    }
+
+    /// Returns the confirmed peer for the current session.
+    ///
+    /// The name is still untrusted display text; only the live session is
+    /// confirmed, not who operates the device.
+    pub(crate) fn session_peer(&self) -> Option<&PairingPeer> {
+        self.session_peer.as_ref()
     }
 
     /// Returns the responder's one-time code while it is displayed.
@@ -268,9 +385,29 @@ impl AppModel {
         self.transfer_progress
     }
 
+    /// Returns the folder compression progress of the pending proposal.
+    pub(crate) fn preparation(&self) -> Option<&TransferPreparation> {
+        self.preparation.as_ref()
+    }
+
+    /// Returns the finished-transfer summary waiting to be dismissed.
+    pub(crate) fn summary(&self) -> Option<&TransferSummary> {
+        self.summary.as_ref()
+    }
+
+    /// Returns the local transfer problem shown on the idle session screen.
+    pub(crate) fn transfer_notice(&self) -> Option<&'static str> {
+        self.transfer_notice
+    }
+
     /// Returns the directory prefilled for the next inbound transfer.
     pub(crate) fn default_destination(&self) -> &Path {
         &self.default_destination
+    }
+
+    /// Returns the directory Lanweave was started in.
+    pub(crate) fn working_directory(&self) -> &Path {
+        &self.working_directory
     }
 
     /// Returns the screen the current state should render.
@@ -294,9 +431,20 @@ impl AppModel {
         let state = self.state;
         AppCapabilities {
             accepts_commands: state != AppState::ShuttingDown,
+            can_open_devices: matches!(state, AppState::Home | AppState::Browsing),
             can_show_devices: state == AppState::Browsing,
-            can_review_files: matches!(state, AppState::Browsing | AppState::SessionIdle),
+            can_show_home: state == AppState::Browsing,
+            can_review_files: matches!(
+                state,
+                AppState::Home | AppState::Browsing | AppState::SessionIdle
+            ),
             can_start_transfer: state == AppState::SessionIdle,
+            can_cancel_transfer: matches!(
+                state,
+                AppState::OutboundProposal
+                    | AppState::TransferringOutbound
+                    | AppState::TransferringInbound
+            ),
             transfer_unavailable: state.has_session() && state != AppState::SessionIdle,
             session_closing: state == AppState::ClosingSession,
             can_disconnect: state.can_disconnect(),
@@ -330,6 +478,17 @@ impl AppModel {
         self.pairing_code = None;
     }
 
+    /// Moves the confirmed peer into the session and drops pairing secrets.
+    pub(super) fn begin_session(&mut self) {
+        self.session_peer = self.pairing_peer.take();
+        self.pairing_code = None;
+    }
+
+    /// Drops the confirmed peer when the session ends.
+    pub(super) fn clear_session_peer(&mut self) {
+        self.session_peer = None;
+    }
+
     /// Stores the inbound manifest waiting for the local decision.
     pub(super) fn set_incoming_proposal(&mut self, proposal: TransferProposal) {
         self.transfer_proposal = Some(proposal);
@@ -343,6 +502,8 @@ impl AppModel {
         self.deferred_selection = None;
         self.outbound_selection = Some(selection);
         self.transfer_progress = None;
+        self.preparation = None;
+        self.transfer_notice = None;
     }
 
     /// Moves the pending local selection to the queue.
@@ -357,6 +518,35 @@ impl AppModel {
     /// Updates the active transfer progress.
     pub(super) fn set_progress(&mut self, progress: TransferProgress) {
         self.transfer_progress = Some(progress);
+        self.preparation = None;
+    }
+
+    /// Updates the folder compression progress of the pending proposal.
+    pub(super) fn set_preparation(&mut self, preparation: TransferPreparation) {
+        self.preparation = Some(preparation);
+    }
+
+    /// Stores the finished-transfer summary shown until dismissal.
+    pub(super) fn set_summary(&mut self, summary: TransferSummary) {
+        self.summary = Some(summary);
+        self.transfer_progress = None;
+    }
+
+    /// Drops the finished-transfer summary.
+    pub(super) fn clear_summary(&mut self) {
+        self.summary = None;
+    }
+
+    /// Records that the session ended while its summary was still shown.
+    pub(super) fn mark_summary_session_closed(&mut self) {
+        if let Some(summary) = self.summary.as_mut() {
+            summary.session_closed = true;
+        }
+    }
+
+    /// Stores a local transfer problem until the next send attempt.
+    pub(super) fn set_transfer_notice(&mut self, notice: &'static str) {
+        self.transfer_notice = Some(notice);
     }
 
     /// Sets the destination prefilled for the next inbound transfer.
@@ -369,12 +559,14 @@ impl AppModel {
         self.transfer_proposal = None;
         self.outbound_selection = None;
         self.transfer_progress = None;
+        self.preparation = None;
     }
 
     /// Clears every transfer value once the session is gone.
     pub(super) fn clear_transfer(&mut self) {
         self.clear_round();
         self.deferred_selection = None;
+        self.transfer_notice = None;
     }
 
     /// Resolves a discovered device to one route with display context.
@@ -402,12 +594,17 @@ impl AppModel {
             state,
             candidates: CandidateStore::new(),
             pairing_peer: None,
+            session_peer: None,
             pairing_code: None,
             transfer_proposal: None,
             outbound_selection: None,
             deferred_selection: None,
             transfer_progress: None,
+            preparation: None,
+            summary: None,
+            transfer_notice: None,
             default_destination: PathBuf::from("."),
+            working_directory: PathBuf::from("."),
         }
     }
 }
@@ -444,6 +641,7 @@ mod tests {
     fn screens_are_derived_from_every_state() {
         let cases = [
             (AppState::Starting, Screen::Starting),
+            (AppState::Home, Screen::Home),
             (AppState::Browsing, Screen::Browsing),
             (AppState::PairingOutbound, Screen::Pairing),
             (AppState::PairingOutboundAccepted, Screen::Pairing),

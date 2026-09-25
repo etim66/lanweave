@@ -44,7 +44,18 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
     }
 
     let effect = match (model.state(), action) {
-        (_, UserAction::ShowHelp | UserAction::ShowDevices) => None,
+        (AppState::Home, UserAction::ShowDevices) => {
+            model.transition_to(AppState::Browsing);
+            None
+        }
+        (_, UserAction::ShowHelp) => None,
+        // The device list is already on screen; the action only closes any
+        // overlay that was open above it.
+        (AppState::Browsing, UserAction::ShowDevices) => None,
+        (AppState::Browsing, UserAction::GoHome) => {
+            model.transition_to(AppState::Home);
+            None
+        }
         (AppState::Browsing, UserAction::SelectDevice(device)) => {
             // The device is resolved against the live store, so a removed
             // device can never start a connection through stale UI state.
@@ -88,6 +99,24 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
             model.transition_to(AppState::SessionIdle);
             Some(Effect::RejectTransfer)
         }
+        (
+            AppState::OutboundProposal
+            | AppState::TransferringOutbound
+            | AppState::TransferringInbound,
+            UserAction::CancelTransfer,
+        ) => Some(Effect::CancelTransfer),
+        (AppState::TransferComplete, UserAction::DismissSummary) => {
+            let session_closed = model
+                .summary()
+                .is_some_and(|summary| summary.session_closed);
+            model.clear_summary();
+            model.transition_to(if session_closed {
+                AppState::Home
+            } else {
+                AppState::SessionIdle
+            });
+            None
+        }
         (state, UserAction::Disconnect) if state.can_disconnect() => {
             if state.is_pairing() {
                 model.transition_to(AppState::ClosingPairing);
@@ -109,10 +138,10 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
 fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     let effect = match (model.state(), event) {
         (AppState::Starting, AppEvent::StartupCompleted) => {
-            model.transition_to(AppState::Browsing);
+            model.transition_to(AppState::Home);
             None
         }
-        (AppState::Browsing, AppEvent::IncomingPairingRequest(peer)) => {
+        (AppState::Home | AppState::Browsing, AppEvent::IncomingPairingRequest(peer)) => {
             model.set_pairing_peer(peer);
             model.transition_to(AppState::PairingInbound);
             None
@@ -133,13 +162,13 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             | AppState::PairingInboundAccepted,
             AppEvent::PairingSucceeded,
         ) => {
-            model.clear_pairing();
+            model.begin_session();
             model.transition_to(AppState::SessionIdle);
             None
         }
         (state, AppEvent::PairingEnded) if state.is_pairing() => {
             model.clear_pairing();
-            model.transition_to(AppState::Browsing);
+            model.transition_to(AppState::Home);
             None
         }
         (AppState::SessionIdle, AppEvent::IncomingTransferRequest(proposal)) => {
@@ -156,6 +185,17 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.transition_to(AppState::InboundProposal);
             None
         }
+        (AppState::OutboundProposal, AppEvent::TransferPreparing(preparation)) => {
+            model.set_preparation(preparation);
+            None
+        }
+        (AppState::OutboundProposal, AppEvent::PreparationFailed(error)) => {
+            model.defer_outbound();
+            model.clear_round();
+            model.set_transfer_notice(error.notice());
+            model.transition_to(AppState::SessionIdle);
+            None
+        }
         (AppState::OutboundProposal, AppEvent::TransferStarted) => {
             model.transition_to(AppState::TransferringOutbound);
             None
@@ -170,9 +210,26 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.set_progress(progress);
             None
         }
-        (state, AppEvent::TransferFinished) if state.is_transfer_active() => {
-            model.clear_round();
-            model.transition_to(AppState::SessionIdle);
+        (state, AppEvent::TransferCompleted(summary))
+            if state.is_transfer_active() || state == AppState::OutboundProposal =>
+        {
+            // A proposal that never started keeps its files queued for `/send`.
+            if state == AppState::OutboundProposal {
+                model.defer_outbound();
+            }
+            // A request cancelled before any file was sent returns straight to
+            // the session screen with a notice, so cancel never looks ignored.
+            if summary.cancelled && summary.files.is_empty() && !summary.session_closed {
+                model.defer_outbound();
+                model.clear_round();
+                model.set_transfer_notice(
+                    "Transfer cancelled. Use /send to review the files and try again.",
+                );
+                model.transition_to(AppState::SessionIdle);
+                return Vec::new();
+            }
+            model.set_summary(summary);
+            model.transition_to(AppState::TransferComplete);
             None
         }
         (AppState::InboundProposalAccepted, AppEvent::TransferStarted) => {
@@ -193,10 +250,30 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
         {
             Some(Effect::RejectPairingBusy)
         }
+        // A new peer proposal replaces a summary that is still on screen so
+        // the required review prompt is never hidden behind it.
+        (AppState::TransferComplete, AppEvent::IncomingTransferRequest(proposal)) => {
+            model.clear_summary();
+            model.set_incoming_proposal(proposal);
+            model.transition_to(AppState::InboundProposal);
+            None
+        }
+        // A session that ends while its summary is shown keeps the summary
+        // until the user dismisses it.
+        (AppState::TransferComplete, AppEvent::SessionClosed) => {
+            model.clear_session_peer();
+            if model.summary().is_some() {
+                model.mark_summary_session_closed();
+            } else {
+                model.transition_to(AppState::Home);
+            }
+            None
+        }
         (state, AppEvent::SessionClosed) if state.is_pairing() || state.has_session() => {
             model.clear_pairing();
+            model.clear_session_peer();
             model.clear_transfer();
-            model.transition_to(AppState::Browsing);
+            model.transition_to(AppState::Home);
             None
         }
         (state, AppEvent::Failed(kind)) if !matches!(state, AppState::Error(_)) => {
@@ -231,7 +308,9 @@ mod tests {
     use crate::app::action::{ConnectionTarget, DeviceId, DirectEndpoint, PairingPeer, UserAction};
     use crate::app::event::{AppEvent, Effect};
     use crate::app::failure::FailureKind;
-    use crate::app::model::{AppModel, AppState, TransferProposal};
+    use crate::app::model::{
+        AppModel, AppState, TransferDirection, TransferProposal, TransferSummary,
+    };
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
     use crate::protocol::{FileEntry, TransferRequest};
@@ -247,12 +326,19 @@ mod tests {
     /// A bounded inbound manifest for transfer events.
     fn proposal() -> TransferProposal {
         TransferProposal::new(
-            &TransferRequest::new(vec![FileEntry {
-                name: "report.txt".to_owned(),
-                size: 64,
-            }])
-            .unwrap(),
+            &TransferRequest::new(vec![FileEntry::new("report.txt".to_owned(), 64)]).unwrap(),
             Some("peer".to_owned()),
+        )
+    }
+
+    /// A completed-transfer summary for reducer tests.
+    fn summary() -> TransferSummary {
+        TransferSummary::new(
+            TransferDirection::Sent,
+            vec![FileEntry::new("report.txt".to_owned(), 64)],
+            None,
+            Some("peer".to_owned()),
+            std::time::Duration::from_secs(1),
         )
     }
 
@@ -286,7 +372,19 @@ mod tests {
             (
                 AppState::Starting,
                 AppEvent::StartupCompleted,
+                AppState::Home,
+                None,
+            ),
+            (
+                AppState::Home,
+                AppEvent::User(UserAction::ShowDevices),
                 AppState::Browsing,
+                None,
+            ),
+            (
+                AppState::Browsing,
+                AppEvent::User(UserAction::GoHome),
+                AppState::Home,
                 None,
             ),
             (
@@ -334,7 +432,7 @@ mod tests {
             (
                 AppState::PairingOutbound,
                 AppEvent::PairingEnded,
-                AppState::Browsing,
+                AppState::Home,
                 None,
             ),
             (
@@ -393,13 +491,31 @@ mod tests {
             ),
             (
                 AppState::TransferringOutbound,
-                AppEvent::TransferFinished,
-                AppState::SessionIdle,
+                AppEvent::TransferCompleted(summary()),
+                AppState::TransferComplete,
                 None,
             ),
             (
                 AppState::TransferringInbound,
-                AppEvent::TransferFinished,
+                AppEvent::TransferCompleted(summary()),
+                AppState::TransferComplete,
+                None,
+            ),
+            (
+                AppState::OutboundProposal,
+                AppEvent::User(UserAction::CancelTransfer),
+                AppState::OutboundProposal,
+                Some(Effect::CancelTransfer),
+            ),
+            (
+                AppState::TransferringOutbound,
+                AppEvent::User(UserAction::CancelTransfer),
+                AppState::TransferringOutbound,
+                Some(Effect::CancelTransfer),
+            ),
+            (
+                AppState::TransferComplete,
+                AppEvent::User(UserAction::DismissSummary),
                 AppState::SessionIdle,
                 None,
             ),
@@ -412,7 +528,7 @@ mod tests {
             (
                 AppState::ClosingSession,
                 AppEvent::SessionClosed,
-                AppState::Browsing,
+                AppState::Home,
                 None,
             ),
             (
@@ -458,6 +574,31 @@ mod tests {
 
             assert_eq!(model.state(), state, "state: {state:?}");
             assert!(effects.is_empty(), "state: {state:?}");
+        }
+    }
+
+    #[test]
+    fn going_home_only_leaves_the_device_list() {
+        let mut model = model_in(AppState::Browsing);
+        assert!(update(&mut model, AppEvent::User(UserAction::GoHome)).is_empty());
+        assert_eq!(model.state(), AppState::Home);
+
+        // The action is inert on the home screen itself.
+        assert!(update(&mut model, AppEvent::User(UserAction::GoHome)).is_empty());
+        assert_eq!(model.state(), AppState::Home);
+
+        // And inert in every other state.
+        for state in all_states() {
+            if state == AppState::Browsing {
+                continue;
+            }
+
+            let mut other = model_in(state);
+            assert!(
+                update(&mut other, AppEvent::User(UserAction::GoHome)).is_empty(),
+                "state: {state:?}"
+            );
+            assert_eq!(other.state(), state, "state: {state:?}");
         }
     }
 
@@ -532,6 +673,7 @@ mod tests {
                 AppState::InboundProposal,
             ),
             (UserAction::RejectTransfer, AppState::InboundProposal),
+            (UserAction::DismissSummary, AppState::TransferComplete),
         ];
 
         for (action, valid_state) in cases {
@@ -554,7 +696,10 @@ mod tests {
         let cases = [
             (AppState::Browsing, AppEvent::PairingSucceeded),
             (AppState::PairingInbound, AppEvent::PairingSucceeded),
-            (AppState::PairingOutbound, AppEvent::TransferFinished),
+            (
+                AppState::PairingOutbound,
+                AppEvent::TransferCompleted(summary()),
+            ),
             (AppState::SessionIdle, AppEvent::TransferStarted),
             (AppState::Browsing, AppEvent::SessionClosed),
             (AppState::Browsing, AppEvent::PairingAccepted),
@@ -585,7 +730,7 @@ mod tests {
             "0000 0042".to_owned()
         );
         update(&mut model, AppEvent::SessionClosed);
-        assert_eq!(model.state(), AppState::Browsing);
+        assert_eq!(model.state(), AppState::Home);
         assert!(model.pairing_code().is_none());
 
         // A failure clears pairing state before showing the error screen.
@@ -705,7 +850,7 @@ mod tests {
             AppEvent::PairingSucceeded,
             AppEvent::IncomingTransferRequest(proposal()),
             AppEvent::TransferStarted,
-            AppEvent::TransferFinished,
+            AppEvent::TransferCompleted(summary()),
             AppEvent::SessionClosed,
             AppEvent::Failed(FailureKind::Internal),
             AppEvent::User(UserAction::SelectDevice(DEVICE)),
@@ -735,17 +880,96 @@ mod tests {
     }
 
     #[test]
-    fn session_close_returns_every_connected_state_to_browsing() {
+    fn session_close_returns_every_connected_state_to_home() {
         for state in all_states() {
             if !state.is_pairing() && !state.has_session() {
+                continue;
+            }
+            // A summary that is still on screen survives the close.
+            if state == AppState::TransferComplete {
                 continue;
             }
 
             let mut model = model_in(state);
 
             assert!(update(&mut model, AppEvent::SessionClosed).is_empty());
-            assert_eq!(model.state(), AppState::Browsing, "state: {state:?}");
+            assert_eq!(model.state(), AppState::Home, "state: {state:?}");
         }
+    }
+
+    #[test]
+    fn a_cancelled_proposal_summary_returns_to_idle_when_dismissed() {
+        let selection = FileSelection::for_test(&[("report.txt", 64)]);
+        let mut model = model_in(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        let cancelled = TransferSummary::new(
+            TransferDirection::Sent,
+            vec![FileEntry::new("report.txt".to_owned(), 64)],
+            None,
+            Some("peer".to_owned()),
+            std::time::Duration::ZERO,
+        )
+        .cancelled(false);
+
+        update(&mut model, AppEvent::TransferCompleted(cancelled));
+        assert_eq!(model.state(), AppState::TransferComplete);
+        assert!(model.summary().unwrap().cancelled);
+        // Files that never went out stay queued for another `/send`.
+        assert_eq!(model.deferred_selection(), Some(&selection));
+
+        update(&mut model, AppEvent::User(UserAction::DismissSummary));
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.summary().is_none());
+    }
+
+    #[test]
+    fn cancelling_a_pending_request_returns_to_idle_with_a_notice() {
+        let selection = FileSelection::for_test(&[("report.txt", 64)]);
+        let mut model = model_in(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        assert_eq!(model.state(), AppState::OutboundProposal);
+
+        // The session reports a cancelled summary with no verified files: the
+        // request never reached the peer, so there is no summary to dismiss.
+        let cancelled = TransferSummary::new(
+            TransferDirection::Sent,
+            Vec::new(),
+            None,
+            Some("peer".to_owned()),
+            std::time::Duration::ZERO,
+        )
+        .cancelled(false);
+        update(&mut model, AppEvent::TransferCompleted(cancelled));
+
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.summary().is_none());
+        assert_eq!(
+            model.transfer_notice(),
+            Some("Transfer cancelled. Use /send to review the files and try again.")
+        );
+        // The untouched files stay queued for another explicit send.
+        assert_eq!(model.deferred_selection(), Some(&selection));
+    }
+
+    #[test]
+    fn a_summary_survives_a_session_close_until_dismissed() {
+        let mut model = model_in(AppState::TransferringInbound);
+        update(&mut model, AppEvent::TransferCompleted(summary()));
+        assert_eq!(model.state(), AppState::TransferComplete);
+
+        update(&mut model, AppEvent::SessionClosed);
+        assert_eq!(model.state(), AppState::TransferComplete);
+        assert!(model.summary().unwrap().session_closed);
+
+        update(&mut model, AppEvent::User(UserAction::DismissSummary));
+        assert_eq!(model.state(), AppState::Home);
+        assert!(model.summary().is_none());
     }
 
     #[test]
@@ -767,7 +991,7 @@ mod tests {
         }
     }
 
-    fn all_states() -> [AppState; 17] {
+    fn all_states() -> [AppState; 18] {
         [
             AppState::Starting,
             AppState::Browsing,
@@ -783,6 +1007,7 @@ mod tests {
             AppState::InboundProposalAccepted,
             AppState::TransferringOutbound,
             AppState::TransferringInbound,
+            AppState::TransferComplete,
             AppState::ClosingSession,
             AppState::Error(FailureKind::Internal),
             AppState::ShuttingDown,
@@ -823,12 +1048,48 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_folder_preparation_defers_the_selection_and_shows_a_notice() {
+        use crate::transfer::selection::PrepareError;
+
+        let selection = FileSelection::for_test(&[("docs.zip", 1_234)]);
+        let mut model = model_in(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        assert_eq!(model.state(), AppState::OutboundProposal);
+
+        update(
+            &mut model,
+            AppEvent::PreparationFailed(PrepareError::TooLarge),
+        );
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert_eq!(model.deferred_selection(), Some(&selection));
+        assert_eq!(
+            model.transfer_notice(),
+            Some(PrepareError::TooLarge.notice())
+        );
+
+        // A new explicit send clears the previous notice.
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection)),
+        );
+        assert_eq!(model.state(), AppState::OutboundProposal);
+        assert!(model.transfer_notice().is_none());
+    }
+
+    #[test]
     fn progress_is_tracked_only_while_a_transfer_runs() {
         let mut model = model_in(AppState::SessionIdle);
         let progress = crate::app::model::TransferProgress {
             index: 1,
             files: 3,
+            file_size: 256,
             transferred: 128,
+            total_size: 1_024,
+            total_transferred: 384,
+            elapsed: std::time::Duration::from_secs(1),
         };
 
         assert!(update(&mut model, AppEvent::TransferProgress(progress)).is_empty());
@@ -837,8 +1098,13 @@ mod tests {
         let mut model = model_in(AppState::TransferringOutbound);
         update(&mut model, AppEvent::TransferProgress(progress));
         assert_eq!(model.transfer_progress(), Some(progress));
-        update(&mut model, AppEvent::TransferFinished);
-        assert_eq!(model.state(), AppState::SessionIdle);
+        update(&mut model, AppEvent::TransferCompleted(summary()));
+        assert_eq!(model.state(), AppState::TransferComplete);
         assert!(model.transfer_progress().is_none());
+        assert!(model.summary().is_some());
+
+        update(&mut model, AppEvent::User(UserAction::DismissSummary));
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.summary().is_none());
     }
 }

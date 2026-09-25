@@ -6,8 +6,9 @@ Tests show that the implementation follows the draft. They do not prove that una
 
 - `lanweave` opens, redraws, resizes, and restores the terminal on exit, error, and panic.
 - Entering `/` shows the commands valid in each app state.
-- Device selection, pairing prompts, code display and entry, file paste, metadata review, progress, rejection, and close screens are keyboard accessible.
-- Pasted paths with spaces, quotes, Unicode, newlines, and terminal escape bytes are handled safely.
+- Device selection, pairing prompts, code display and entry, file and folder paste, metadata review, per-file progress, completion summaries, rejection, cancellation, and close screens are keyboard accessible.
+- Long device, command, file-review, transfer, and summary lists scroll with the arrow keys, PageUp/PageDown, and Home/End; the active transfer follows the file in flight until a manual scroll pauses it.
+- Pasted paths with spaces, quotes, Unicode, newlines, `file://` URIs, escaped spaces, and terminal escape bytes are handled safely.
 - Peer display names and filenames cannot inject terminal controls.
 
 ## Discovery Tests

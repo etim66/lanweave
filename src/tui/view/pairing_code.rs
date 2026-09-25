@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Paragraph};
 use crate::app::interaction::PairingCodeInput;
 use crate::app::model::AppModel;
 
+use super::digits;
 use super::layout::{centered_rect, inset_surface, surface_width};
 use super::presenter::status_text;
 use super::render_focus_rail;
@@ -34,8 +35,14 @@ pub(super) fn render(
         return;
     }
 
-    let stack = centered_rect(area, surface_width(area), 6);
-    let card = Rect::new(stack.x, stack.y, stack.width, 4);
+    let stack = centered_rect(area, surface_width(area), 11);
+    let show_hints = stack.height >= 10;
+    let card = Rect::new(
+        stack.x,
+        stack.y,
+        stack.width,
+        stack.height.saturating_sub(if show_hints { 2 } else { 0 }),
+    );
     frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), card);
     render_focus_rail(frame, card);
     let inner = inset_surface(card, 1);
@@ -49,23 +56,49 @@ pub(super) fn render(
         ),
     );
 
-    render_panel_line(
-        frame,
-        Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        Line::from(vec![
-            Span::styled("> ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(input.grouped(), Style::new().fg(TEXT)),
-        ]),
-    );
+    let digits: Vec<char> = input.grouped().chars().collect();
+    if digits.is_empty() {
+        if inner.height >= 4 {
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    "····   ····",
+                    Style::new().fg(MUTED).add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Center)
+                .style(Style::new().bg(SURFACE)),
+                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            );
+        }
+    } else {
+        for row_index in 0..digits::ROWS {
+            let row_y = inner
+                .y
+                .saturating_add(2 + u16::try_from(row_index).unwrap_or(u16::MAX));
+            if row_y >= card.y + card.height {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    digits::row(&digits, row_index),
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Center)
+                .style(Style::new().bg(SURFACE)),
+                Rect::new(inner.x, row_y, inner.width, 1),
+            );
+        }
+    }
 
-    render_panel_line(
-        frame,
-        Rect::new(inner.x, inner.y + 2, inner.width, 1),
-        Line::styled(
-            "The code is shown on the other device and expires after about two minutes.",
-            Style::new().fg(MUTED),
-        ),
-    );
+    if inner.height >= 8 {
+        render_panel_line(
+            frame,
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            Line::styled(
+                "The other device shows this code; it expires after about two minutes.",
+                Style::new().fg(MUTED),
+            ),
+        );
+    }
 
     let hints = Rect::new(
         stack.x,

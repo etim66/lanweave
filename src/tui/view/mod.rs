@@ -1,13 +1,17 @@
 mod chrome;
+mod dialog;
+mod digits;
 mod direct_address;
 mod file_selection;
 mod help;
 mod home;
 mod layout;
 mod pairing_code;
+mod pairing_prompt;
 mod palette;
 mod presenter;
 mod theme;
+mod transfer;
 mod transfer_review;
 
 use ratatui::Frame;
@@ -51,6 +55,9 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         Some(Overlay::DirectAddress(input)) => {
             direct_address::render(frame, content, model, input);
         }
+        Some(Overlay::PairingPrompt(prompt)) => {
+            pairing_prompt::render(frame, content, model, prompt);
+        }
         Some(Overlay::PairingCode(input)) => {
             pairing_code::render(frame, content, model, input);
         }
@@ -90,16 +97,17 @@ mod tests {
     use ratatui::style::Color;
     use tokio::time::Instant;
 
+    use super::chrome;
     use super::render;
     use super::theme::{BACKGROUND, HIGHLIGHT, SURFACE};
     use crate::app::action::{DeviceId, KeyInput, PairingPeer, UserAction};
     use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
     use crate::app::interaction::{
-        FileSelectionInput, Overlay, TransferReviewInput, UiState, apply_key_input,
+        DialogFocus, FileSelectionInput, Overlay, TransferReviewInput, UiState, apply_key_input,
         apply_user_action, reconcile,
     };
-    use crate::app::model::{AppModel, AppState, TransferProposal};
+    use crate::app::model::{AppModel, AppState, TransferProgress, TransferProposal};
     use crate::app::reducer::update;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
@@ -108,17 +116,21 @@ mod tests {
 
     #[test]
     fn basic_screens_render_at_normal_and_small_sizes() {
-        let mut browsing = AppModel::new();
-        update(&mut browsing, AppEvent::StartupCompleted);
+        let mut home = AppModel::new();
+        update(&mut home, AppEvent::StartupCompleted);
 
-        let mut error = browsing.clone();
+        let mut browsing = home.clone();
+        update(&mut browsing, AppEvent::User(UserAction::ShowDevices));
+
+        let mut error = home.clone();
         update(&mut error, AppEvent::Failed(FailureKind::Internal));
 
-        let mut shutdown = browsing.clone();
+        let mut shutdown = home.clone();
         update(&mut shutdown, AppEvent::ShutdownRequested);
 
         let cases = [
             (AppModel::new(), "Preparing the terminal"),
+            (home, "Welcome to Lanweave"),
             (browsing, "No devices found"),
             (error, "Lanweave encountered"),
             (shutdown, "Shutting down safely"),
@@ -141,7 +153,7 @@ mod tests {
         let output = render_to_string(&model, 80, 24);
         let backgrounds = render_backgrounds(&model, 80, 24);
 
-        assert!(output.contains("Browsing for devices"));
+        assert!(output.contains("Ready"));
         assert!(output.contains("v0.1.0"));
         assert!(backgrounds.contains(&BACKGROUND));
         assert!(backgrounds.contains(&SURFACE));
@@ -168,7 +180,16 @@ mod tests {
             let output = render_to_string(&model, 80, 24);
 
             assert!(output.contains("Error"));
-            assert!(!output.contains("/home/") && !output.contains('\\'));
+
+            // The footer intentionally shows the local working directory, which
+            // contains backslashes on Windows. Only the failure panel itself
+            // must stay free of paths.
+            let (content, footer) = output.rsplit_once('\n').expect("a footer row");
+            assert!(footer.contains("Error"), "{failure:?}: {footer}");
+            assert!(
+                !content.contains("/home/") && !content.contains('\\'),
+                "{failure:?} leaked a path: {content}"
+            );
         }
     }
 
@@ -199,6 +220,7 @@ mod tests {
                 Instant::now(),
             ))),
         );
+        update(&mut session, AppEvent::User(UserAction::ShowDevices));
         update(
             &mut session,
             AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
@@ -243,9 +265,18 @@ mod tests {
         assert!(output.contains("Pairing request"));
         assert!(output.contains("untrusted"));
         assert!(output.contains("peer\\u{000A}name"));
-        assert!(output.contains("192.0.2.10:4242"));
+        assert!(!output.contains("192.0.2.10:4242"), "the address is noise");
 
-        // The responder displays the code grouped and never as a wire value.
+        // The decision is a dialog with focused Accept and Reject buttons.
+        let mut ui = UiState::default();
+        reconcile(&prompt, &mut ui);
+        let output = render_with_ui(&prompt, &ui, 80, 24);
+        assert!(output.contains("Accept"));
+        assert!(output.contains("Reject"));
+        assert!(output.contains("left/right"));
+        assert!(!render_with_ui(&prompt, &ui, 20, 4).is_empty());
+
+        // The responder displays the code grouped in the large digit font.
         let mut display = prompt.clone();
         update(&mut display, AppEvent::User(UserAction::AcceptPairing));
         update(
@@ -253,8 +284,10 @@ mod tests {
             AppEvent::PairingCodeIssued(PairingCode::parse("01234567").unwrap()),
         );
         let output = render_to_string(&display, 80, 24);
-        assert!(output.contains("Pairing code"));
-        assert!(output.contains("0123 4567"));
+        assert!(output.contains("Share this code"));
+        assert!(output.contains("Give this code to the sender to authorize the session."));
+        assert!(!output.contains("Type this code on the other device."));
+        assert!(output.contains('█'));
 
         // The initiator's code entry opens with the accepted response.
         let mut entry = browsing_with(&["peer"]);
@@ -275,12 +308,13 @@ mod tests {
         }
         let output = render_with_ui(&entry, &ui, 80, 24);
         assert!(output.contains("Enter the pairing code"));
-        assert!(output.contains("1234"));
+        assert!(output.contains('█'));
     }
 
     fn browsing_with(names: &[&str]) -> AppModel {
         let mut model = AppModel::new();
         update(&mut model, AppEvent::StartupCompleted);
+        update(&mut model, AppEvent::User(UserAction::ShowDevices));
         for name in names {
             update(
                 &mut model,
@@ -302,13 +336,52 @@ mod tests {
         assert!(output.contains("alpha"));
         assert!(output.contains("zeta"));
         assert!(output.find("alpha").unwrap() < output.find("zeta").unwrap());
-        assert!(output.contains(":4242"));
+        // Only the friendly name is shown for uniquely named devices.
+        assert!(!output.contains(":4242"));
+        assert!(!output.contains("alpha.local."));
         assert!(output.contains("untrusted"));
 
         let mut ui = UiState::default();
         apply_key_input(&model, &mut ui, KeyInput::Down);
         let backgrounds = render_backgrounds_with_ui(&model, &ui, 80, 24);
         assert!(backgrounds.contains(&HIGHLIGHT));
+    }
+
+    #[test]
+    fn devices_with_the_same_name_show_their_host_to_tell_them_apart() {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+        update(&mut model, AppEvent::User(UserAction::ShowDevices));
+        for instance in ["peer-one", "peer-two"] {
+            update(
+                &mut model,
+                AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test_named(
+                    instance,
+                    "peer",
+                    Instant::now(),
+                ))),
+            );
+        }
+
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("peer-one.local."));
+        assert!(output.contains("peer-two.local."));
+    }
+
+    #[test]
+    fn waiting_screens_show_their_cancel_button() {
+        let mut waiting = browsing_with(&["peer"]);
+        update(
+            &mut waiting,
+            AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
+        );
+        let output = render_to_string(&waiting, 80, 24);
+        assert!(output.contains("Waiting for response"));
+        assert!(output.contains("Cancel request"));
+        assert!(!output.contains("127.0.0.1:4242"), "the address is noise");
+
+        let output = render_to_string(&AppModel::for_test(AppState::OutboundProposal), 80, 24);
+        assert!(output.contains("Cancel transfer"));
     }
 
     #[test]
@@ -319,6 +392,7 @@ mod tests {
         assert!(output.contains("No devices found"));
         assert!(output.contains("Searching the local network"));
         assert!(output.contains("up/down"));
+        assert!(output.contains("esc home"));
     }
 
     #[test]
@@ -339,6 +413,41 @@ mod tests {
     }
 
     #[test]
+    fn file_review_shows_a_reviewing_note() {
+        let review = FileSelectionInput {
+            text: "a.txt".to_owned(),
+            reviewing: true,
+            ..FileSelectionInput::default()
+        };
+        let ui = UiState::for_test(Overlay::FileSelection(review));
+        let session = AppModel::for_test(AppState::SessionIdle);
+
+        let output = render_with_ui(&session, &ui, 80, 24);
+        assert!(output.contains("Reviewing pasted paths..."));
+    }
+
+    #[test]
+    fn idle_session_shows_a_preparation_failure_notice() {
+        use crate::transfer::selection::PrepareError;
+
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(FileSelection::for_test(&[(
+                "docs.zip", 1,
+            )]))),
+        );
+        update(
+            &mut model,
+            AppEvent::PreparationFailed(PrepareError::TooLarge),
+        );
+
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("more than 100,000 items"));
+        assert!(output.contains("Use /send"));
+    }
+
+    #[test]
     fn file_review_renders_entries_issues_and_send_state() {
         let review = FileSelectionInput {
             text: String::new(),
@@ -348,6 +457,7 @@ mod tests {
                 "the file was not found",
             )],
             selected: Some(0),
+            ..FileSelectionInput::default()
         };
         let ui = UiState::for_test(Overlay::FileSelection(review));
 
@@ -373,14 +483,9 @@ mod tests {
             &mut model,
             AppEvent::IncomingTransferRequest(TransferProposal::new(
                 &TransferRequest::new(vec![
-                    FileEntry {
-                        name: "report.txt".to_owned(),
-                        size: 2048,
-                    },
-                    FileEntry {
-                        name: "photo.jpg".to_owned(),
-                        size: 1,
-                    },
+                    FileEntry::new("report.txt".to_owned(), 2048),
+                    FileEntry::new("photo.jpg".to_owned(), 1),
+                    FileEntry::folder("docs.zip".to_owned(), 1_234, 42, 987_654),
                 ])
                 .unwrap(),
                 Some("peer".to_owned()),
@@ -393,23 +498,290 @@ mod tests {
         assert!(output.contains("Incoming files"));
         assert!(output.contains("report.txt"));
         assert!(output.contains("photo.jpg"));
+        assert!(output.contains("docs.zip"));
+        assert!(output.contains("folder · 42 items"));
         assert!(output.contains("2.0 KiB"));
         assert!(output.contains("From peer"));
         assert!(output.contains("Save to:"));
 
         // Tiny terminals fall back to a single count line.
         let tiny = render_with_ui(&model, &ui, 30, 4);
-        assert!(tiny.contains("2 incoming file(s)"));
+        assert!(tiny.contains("3 incoming file(s)"));
 
-        // At six rows the error keeps its reserved row above the destination.
+        // A short card shows the error rather than hiding it below the fold,
+        // and a taller one keeps both the error and the destination.
         let mut error_ui = UiState::for_test(Overlay::TransferReview(TransferReviewInput {
             destination: "/tmp".to_owned(),
             error: Some("Enter an existing directory"),
+            focus: DialogFocus::Accept,
+            scroll: 0,
         }));
         reconcile(&model, &mut error_ui);
         let small = render_with_ui(&model, &error_ui, 80, 6);
         assert!(small.contains("Enter an existing directory"));
-        assert!(small.contains("Save to:"));
+        assert!(small.contains("Accept"));
+        assert!(small.contains("Reject"));
+        let tall = render_with_ui(&model, &error_ui, 80, 10);
+        assert!(tall.contains("Enter an existing directory"));
+        assert!(tall.contains("Save to:"));
+    }
+
+    #[test]
+    fn the_pairing_prompt_buttons_follow_arrow_keys() {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+        update(
+            &mut model,
+            AppEvent::IncomingPairingRequest(PairingPeer::new(
+                Some("peer".to_owned()),
+                "192.0.2.10:4242".to_owned(),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        // Accept is focused first, so Enter accepts without any navigation.
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::AcceptPairing)
+        );
+
+        // Right moves the focus to Reject, where Enter rejects.
+        reconcile(&model, &mut ui);
+        apply_key_input(&model, &mut ui, KeyInput::Right);
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("Accept"));
+        assert!(output.contains("Reject"));
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::RejectPairing)
+        );
+
+        // Escape stays a shortcut for reject.
+        reconcile(&model, &mut ui);
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Escape),
+            Some(UserAction::RejectPairing)
+        );
+    }
+
+    #[test]
+    fn large_terminals_show_the_block_wordmark() {
+        let model = browsing_with(&[]);
+        let output = render_to_string(&model, 80, 30);
+
+        assert!(output.contains('█'), "the block wordmark should render");
+        assert!(output.contains("No devices found"));
+    }
+
+    #[test]
+    fn footer_shows_the_working_directory_beside_the_status() {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+
+        let output = render_to_string(&model, 120, 24);
+        let directory = chrome::shorten_home(&model.working_directory().display().to_string());
+        let prefix: String = directory.chars().take(10).collect();
+        assert!(
+            output.contains(&prefix),
+            "the footer must show the opened directory: {output}"
+        );
+        assert!(output.contains("Ready"));
+        assert!(output.contains("v0.1.0"));
+    }
+
+    #[test]
+    fn transfer_panels_render_bars_progress_and_destination() {
+        let selection = FileSelection::for_test(&[("report.txt", 2_048), ("video.mp4", 4_096)]);
+        let mut sending = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut sending,
+            AppEvent::User(UserAction::StartTransfer(selection)),
+        );
+        update(&mut sending, AppEvent::TransferStarted);
+        update(
+            &mut sending,
+            AppEvent::TransferProgress(TransferProgress {
+                index: 0,
+                files: 2,
+                file_size: 2_048,
+                transferred: 1_024,
+                total_size: 6_144,
+                total_transferred: 1_024,
+                elapsed: std::time::Duration::from_secs(2),
+            }),
+        );
+
+        let output = render_to_string(&sending, 80, 24);
+        assert!(output.contains("Sending to"));
+        assert!(output.contains("file 1 of 2"));
+        assert!(output.contains("17%"));
+        assert!(output.contains("report.txt"));
+        assert!(output.contains("video.mp4"));
+        assert!(output.contains('█'));
+
+        let mut receiving = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut receiving,
+            AppEvent::IncomingTransferRequest(TransferProposal::new(
+                &TransferRequest::new(vec![FileEntry::new("report.txt".to_owned(), 2_048)])
+                    .unwrap(),
+                Some("peer".to_owned()),
+            )),
+        );
+        update(
+            &mut receiving,
+            AppEvent::User(UserAction::AcceptTransfer(std::path::PathBuf::from(
+                "/incoming",
+            ))),
+        );
+        update(&mut receiving, AppEvent::TransferStarted);
+
+        let output = render_to_string(&receiving, 80, 24);
+        assert!(output.contains("Receiving from peer"));
+        assert!(output.contains("Saving to: /incoming"));
+    }
+
+    #[test]
+    fn transfer_summary_renders_files_and_destination() {
+        let mut model = AppModel::for_test(AppState::TransferringInbound);
+        update(
+            &mut model,
+            AppEvent::TransferCompleted(crate::app::model::TransferSummary::new(
+                crate::app::model::TransferDirection::Received,
+                vec![FileEntry::new("report.txt".to_owned(), 2_048)],
+                Some(std::path::PathBuf::from("/incoming")),
+                Some("peer".to_owned()),
+                std::time::Duration::from_secs(3),
+            )),
+        );
+
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("Transfer complete"));
+        assert!(output.contains("Received 1 file(s)"));
+        assert!(output.contains("from peer"));
+        assert!(output.contains("report.txt"));
+        assert!(output.contains("Saved to: /incoming"));
+        assert!(output.contains("enter"));
+    }
+
+    #[test]
+    fn active_transfer_keeps_the_current_file_visible() {
+        let names: Vec<String> = (0..12)
+            .map(|index| format!("file-{index:02}.mp4"))
+            .collect();
+        let entries: Vec<(&str, u64)> = names.iter().map(|name| (name.as_str(), 1_024)).collect();
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(FileSelection::for_test(&entries))),
+        );
+        update(&mut model, AppEvent::TransferStarted);
+        update(
+            &mut model,
+            AppEvent::TransferProgress(TransferProgress {
+                index: 10,
+                files: 12,
+                file_size: 1_024,
+                transferred: 512,
+                total_size: 12_288,
+                total_transferred: 6_000,
+                elapsed: std::time::Duration::from_secs(2),
+            }),
+        );
+
+        // The window follows the live file instead of starting at file one.
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("file 11 of 12"));
+        assert!(
+            output.contains("file-10.mp4"),
+            "the live file must be visible: {output}"
+        );
+        assert!(!output.contains("file-00.mp4"));
+
+        // A manual scroll pauses the follow and shows the live shortcut.
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Up), None);
+        let scrolled = render_with_ui(&model, &ui, 80, 24);
+        assert!(scrolled.contains("file-09.mp4"));
+        assert!(
+            scrolled.contains("live"),
+            "paused scroll offers End: {scrolled}"
+        );
+
+        // End returns to the live view with the current file visible again.
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::End), None);
+        let resumed = render_with_ui(&model, &ui, 80, 24);
+        assert!(resumed.contains("file-10.mp4"));
+    }
+
+    #[test]
+    fn inbound_review_scrolls_to_later_manifest_entries() {
+        let entries: Vec<FileEntry> = (0..12)
+            .map(|index| FileEntry::new(format!("photo-{index:02}.jpg"), 1))
+            .collect();
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::IncomingTransferRequest(TransferProposal::new(
+                &TransferRequest::new(entries).unwrap(),
+                Some("peer".to_owned()),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("photo-00.jpg"));
+        assert!(!output.contains("photo-11.jpg"));
+
+        for _ in 0..10 {
+            apply_key_input(&model, &mut ui, KeyInput::Down);
+        }
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(
+            output.contains("photo-10.jpg"),
+            "scrolling must reach later entries: {output}"
+        );
+        assert!(!output.contains("photo-00.jpg"));
+        assert!(!output.contains("photo-11.jpg"));
+
+        apply_key_input(&model, &mut ui, KeyInput::End);
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("photo-11.jpg"));
+    }
+
+    #[test]
+    fn transfer_summary_scrolls_to_later_files() {
+        let entries: Vec<FileEntry> = (0..12)
+            .map(|index| FileEntry::new(format!("doc-{index:02}.pdf"), 1))
+            .collect();
+        let mut model = AppModel::for_test(AppState::TransferringInbound);
+        update(
+            &mut model,
+            AppEvent::TransferCompleted(crate::app::model::TransferSummary::new(
+                crate::app::model::TransferDirection::Received,
+                entries,
+                None,
+                Some("peer".to_owned()),
+                std::time::Duration::from_secs(3),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("doc-00.pdf"));
+        assert!(!output.contains("doc-11.pdf"));
+
+        apply_key_input(&model, &mut ui, KeyInput::End);
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(
+            output.contains("doc-11.pdf"),
+            "End must reach the last file: {output}"
+        );
+        assert!(!output.contains("doc-00.pdf"));
     }
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {

@@ -8,7 +8,7 @@ use crate::app::command_palette::{CommandAvailability, CommandSpec, visible_comm
 use crate::app::interaction::CommandPalette;
 use crate::app::model::AppModel;
 
-use super::layout::{centered_rect, inset_surface, surface_width};
+use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
 use super::presenter::status_text;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, HIGHLIGHT, MUTED, SURFACE, TEXT};
@@ -102,7 +102,7 @@ fn render_rows(
         .selected
         .and_then(|selected| commands.iter().position(|command| command.id == selected))
         .unwrap_or(0);
-    let start = selected_index.saturating_add(1).saturating_sub(capacity);
+    let (start, _) = scroll_window(commands.len(), selected_index, capacity);
 
     for (row_index, command) in commands.iter().skip(start).take(capacity).enumerate() {
         let availability = (command.availability)(model.capabilities());

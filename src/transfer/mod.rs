@@ -8,5 +8,6 @@
 //! lives in [`engine`]. Both are local-only until the session owner connects
 //! them to the network.
 
+pub(crate) mod archive;
 pub(crate) mod engine;
 pub(crate) mod selection;

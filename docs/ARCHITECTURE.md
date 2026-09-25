@@ -55,7 +55,7 @@ owner connects those local adapters to `DATA` frames in a later feature.
 | `session` | Live connection authorization, proposals, timers | Terminal rendering |
 | `protocol` | Wire ordering and message validation | Sockets, files, or user consent |
 | `transport` | Bounded framed I/O | Authorization and consent policy |
-| `transfer` | Path review, manifest, bounded hashing and streaming | Terminal policy or wire ordering |
+| `transfer` | Path review, manifest, folder archiving, bounded hashing and streaming | Terminal policy or wire ordering |
 | `storage` | Safe names, temporary files, no-overwrite finalization | TUI or wire policy |
 
 ## Application Event Loop

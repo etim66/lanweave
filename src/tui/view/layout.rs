@@ -30,3 +30,38 @@ pub(super) fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         height,
     )
 }
+
+/// Returns the visible `(start, cursor)` of a list windowed around `cursor`.
+///
+/// The cursor is clamped to the last row and rests at the bottom edge once the
+/// list is longer than `capacity`, matching the device, command, and file
+/// review lists.
+pub(super) fn scroll_window(len: usize, cursor: usize, capacity: usize) -> (usize, usize) {
+    if len == 0 || capacity == 0 {
+        return (0, 0);
+    }
+    let cursor = cursor.min(len - 1);
+    (cursor.saturating_add(1).saturating_sub(capacity), cursor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scroll_window;
+
+    #[test]
+    fn scroll_window_keeps_the_cursor_visible_and_clamps_it() {
+        // An empty list or a zero-row window has nothing to show.
+        assert_eq!(scroll_window(0, 3, 5), (0, 0));
+        assert_eq!(scroll_window(10, 4, 0), (0, 0));
+
+        // A short list starts at the top and keeps the cursor clamped.
+        assert_eq!(scroll_window(3, 1, 5), (0, 1));
+        assert_eq!(scroll_window(3, 99, 5), (0, 2));
+
+        // The cursor rests at the bottom edge while the window moves down.
+        assert_eq!(scroll_window(10, 0, 5), (0, 0));
+        assert_eq!(scroll_window(10, 4, 5), (0, 4));
+        assert_eq!(scroll_window(10, 5, 5), (1, 5));
+        assert_eq!(scroll_window(10, 99, 5), (5, 9));
+    }
+}

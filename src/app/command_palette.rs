@@ -11,8 +11,10 @@ pub(crate) const MAX_COMMAND_QUERY_CHARS: usize = 64;
 pub(crate) enum CommandId {
     Help,
     Devices,
+    Home,
     Connect,
     Send,
+    Cancel,
     Disconnect,
     Quit,
 }
@@ -36,7 +38,7 @@ pub(crate) struct CommandSpec {
 }
 
 /// The complete slash command table, in display order.
-const COMMANDS: [CommandSpec; 6] = [
+const COMMANDS: [CommandSpec; 8] = [
     CommandSpec {
         id: CommandId::Help,
         name: "/help",
@@ -52,6 +54,13 @@ const COMMANDS: [CommandSpec; 6] = [
         action: UserAction::ShowDevices,
     },
     CommandSpec {
+        id: CommandId::Home,
+        name: "/home",
+        description: "Return to the home screen",
+        availability: home_availability,
+        action: UserAction::GoHome,
+    },
+    CommandSpec {
         id: CommandId::Connect,
         name: "/connect",
         description: "Connect to a host:port directly",
@@ -64,6 +73,13 @@ const COMMANDS: [CommandSpec; 6] = [
         description: "Review and send files",
         availability: send_availability,
         action: UserAction::OpenFileSelection,
+    },
+    CommandSpec {
+        id: CommandId::Cancel,
+        name: "/cancel",
+        description: "Cancel the pending or active transfer",
+        availability: cancel_availability,
+        action: UserAction::CancelTransfer,
     },
     CommandSpec {
         id: CommandId::Disconnect,
@@ -171,9 +187,18 @@ fn always_available(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
-/// Availability for the devices command, which needs the browsing screen.
+/// Availability for the devices command, which opens the device list.
 fn devices_availability(capabilities: AppCapabilities) -> CommandAvailability {
-    if capabilities.can_show_devices {
+    if capabilities.can_open_devices {
+        CommandAvailability::Enabled
+    } else {
+        CommandAvailability::Hidden
+    }
+}
+
+/// Availability for the home command, which leaves the device list.
+fn home_availability(capabilities: AppCapabilities) -> CommandAvailability {
+    if capabilities.can_show_home {
         CommandAvailability::Enabled
     } else {
         CommandAvailability::Hidden
@@ -191,6 +216,15 @@ fn send_availability(capabilities: AppCapabilities) -> CommandAvailability {
         CommandAvailability::Disabled("The session is closing")
     } else if capabilities.transfer_unavailable {
         CommandAvailability::Disabled("Transfer already active")
+    } else {
+        CommandAvailability::Hidden
+    }
+}
+
+/// Availability for the cancel command, which needs a pending or active transfer.
+fn cancel_availability(capabilities: AppCapabilities) -> CommandAvailability {
+    if capabilities.can_cancel_transfer {
+        CommandAvailability::Enabled
     } else {
         CommandAvailability::Hidden
     }
@@ -226,15 +260,17 @@ mod tests {
             .map(|command| command.name)
             .collect::<HashSet<_>>();
 
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands.len(), 8);
         assert_eq!(names.len(), commands.len());
         assert!(commands.iter().all(|command| command.name.starts_with('/')));
         assert_eq!(commands[0].action, UserAction::ShowHelp);
         assert_eq!(commands[1].action, UserAction::ShowDevices);
-        assert_eq!(commands[2].action, UserAction::OpenDirectAddress);
-        assert_eq!(commands[3].action, UserAction::OpenFileSelection);
-        assert_eq!(commands[4].action, UserAction::Disconnect);
-        assert_eq!(commands[5].action, UserAction::Quit);
+        assert_eq!(commands[2].action, UserAction::GoHome);
+        assert_eq!(commands[3].action, UserAction::OpenDirectAddress);
+        assert_eq!(commands[4].action, UserAction::OpenFileSelection);
+        assert_eq!(commands[5].action, UserAction::CancelTransfer);
+        assert_eq!(commands[6].action, UserAction::Disconnect);
+        assert_eq!(commands[7].action, UserAction::Quit);
     }
 
     #[test]
@@ -256,15 +292,24 @@ mod tests {
             );
             assert_eq!(
                 availability(CommandId::Devices),
-                if state == AppState::Browsing {
+                if matches!(state, AppState::Home | AppState::Browsing) {
                     CommandAvailability::Enabled
                 } else {
                     CommandAvailability::Hidden
                 }
             );
             assert_eq!(
-                availability(CommandId::Connect),
+                availability(CommandId::Home),
                 if state == AppState::Browsing {
+                    CommandAvailability::Enabled
+                } else {
+                    CommandAvailability::Hidden
+                },
+                "state: {state:?}"
+            );
+            assert_eq!(
+                availability(CommandId::Connect),
+                if matches!(state, AppState::Home | AppState::Browsing) {
                     CommandAvailability::Enabled
                 } else {
                     CommandAvailability::Hidden
@@ -274,7 +319,9 @@ mod tests {
             assert_eq!(
                 availability(CommandId::Send),
                 match state {
-                    AppState::Browsing | AppState::SessionIdle => CommandAvailability::Enabled,
+                    AppState::Home | AppState::Browsing | AppState::SessionIdle => {
+                        CommandAvailability::Enabled
+                    }
                     AppState::ClosingSession => {
                         CommandAvailability::Disabled("The session is closing")
                     }
@@ -282,6 +329,20 @@ mod tests {
                         CommandAvailability::Disabled("Transfer already active")
                     }
                     _ => CommandAvailability::Hidden,
+                },
+                "state: {state:?}"
+            );
+            assert_eq!(
+                availability(CommandId::Cancel),
+                if matches!(
+                    state,
+                    AppState::OutboundProposal
+                        | AppState::TransferringOutbound
+                        | AppState::TransferringInbound
+                ) {
+                    CommandAvailability::Enabled
+                } else {
+                    CommandAvailability::Hidden
                 },
                 "state: {state:?}"
             );
@@ -328,6 +389,11 @@ mod tests {
             Some(UserAction::OpenDirectAddress)
         );
         assert_eq!(resolve(session, "connect", Some(CommandId::Connect)), None);
+        assert_eq!(
+            resolve(browsing, "home", Some(CommandId::Home)),
+            Some(UserAction::GoHome)
+        );
+        assert_eq!(resolve(session, "home", Some(CommandId::Home)), None);
 
         assert_eq!(
             move_selection(browsing, "", Some(CommandId::Quit), true),

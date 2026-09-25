@@ -8,7 +8,7 @@ use crate::app::interaction::FileSelectionInput;
 use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
-use super::layout::{centered_rect, inset_surface, surface_width};
+use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
 use super::presenter::format_size;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, ERROR, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
@@ -102,7 +102,7 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Fil
             frame,
             Rect::new(inner.x, y, inner.width, 1),
             Line::styled(
-                format!("{}: {}", issue.path(), issue.reason()),
+                issue_text(issue.path(), issue.reason(), inner.width),
                 Style::new().fg(ERROR),
             ),
         );
@@ -144,8 +144,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, input: &FileSelectionInput) {
     }
 
     let capacity = usize::from(area.height);
-    let selected = input.selected.unwrap_or(0);
-    let start = selected.saturating_add(1).saturating_sub(capacity);
+    let (start, _) = scroll_window(files.len(), input.selected.unwrap_or(0), capacity);
 
     for (offset, file) in files.iter().skip(start).take(capacity).enumerate() {
         let index = start + offset;
@@ -155,14 +154,27 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, input: &FileSelectionInput) {
         } else {
             Style::new().bg(SURFACE).fg(TEXT)
         };
-        let line = Line::from(vec![
-            Span::styled(
-                format!("  {} ", index + 1),
-                row_style.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(escape_display(file.name()), row_style),
-            Span::styled(format!("  {}", format_size(file.size())), row_style),
-        ]);
+        let line = {
+            let mut spans = vec![
+                Span::styled(
+                    format!("  {} ", index + 1),
+                    row_style.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(escape_display(file.name()), row_style),
+                Span::styled(format!("  {}", format_size(file.size())), row_style),
+            ];
+            if let Some(archive) = file.archive() {
+                spans.push(Span::styled(
+                    format!(
+                        "  folder · {} items · {}",
+                        archive.items,
+                        format_size(archive.source_size)
+                    ),
+                    Style::new().fg(WARNING),
+                ));
+            }
+            Line::from(spans)
+        };
         frame.render_widget(
             Paragraph::new(line).style(row_style),
             Rect::new(
@@ -177,6 +189,12 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, input: &FileSelectionInput) {
 
 /// Describes whether the reviewed files can be sent right now.
 fn status_line(model: &AppModel, input: &FileSelectionInput) -> Line<'static> {
+    if input.is_reviewing() {
+        return Line::styled(
+            "Reviewing pasted paths...",
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        );
+    }
     if input.selection.is_empty() {
         return Line::styled(
             "Paste or type file paths, then press enter.",
@@ -196,20 +214,83 @@ fn status_line(model: &AppModel, input: &FileSelectionInput) -> Line<'static> {
 }
 
 /// Renders the pending input as one line.
+///
+/// A multi-path paste is summarized by its path count, whether the clipboard
+/// used newlines, carriage returns, or NUL separators.
 fn input_display(text: &str) -> String {
     if text.is_empty() {
         return "Paste file paths, one per line".to_owned();
     }
-    if text.contains('\n') {
-        return format!(
-            "{} lines ready; press enter to review",
-            text.lines().count()
-        );
+    let entries = text
+        .split(['\r', '\n', '\0'])
+        .filter(|entry| !entry.trim().is_empty())
+        .count();
+    if entries > 1 {
+        return format!("{entries} paths ready; press enter to review");
     }
     escape_display(text)
+}
+
+/// Builds one rejected-path line, shortening the path so the reason stays
+/// visible inside `width` columns.
+fn issue_text(path: &str, reason: &str, width: u16) -> String {
+    let limit = usize::from(width);
+    let full = format!("{path}: {reason}");
+    if full.chars().count() <= limit {
+        return full;
+    }
+
+    let suffix = format!(": {reason}");
+    let suffix_len = suffix.chars().count();
+    if suffix_len + 4 <= limit {
+        let keep = limit - suffix_len - 3;
+        let mut shortened: String = path.chars().take(keep).collect();
+        shortened.push_str("...");
+        shortened.push_str(&suffix);
+        return shortened;
+    }
+
+    let keep = limit.saturating_sub(3);
+    let mut shortened: String = full.chars().take(keep).collect();
+    shortened.push_str("...");
+    shortened
 }
 
 /// Renders one background-filled line inside the review card.
 fn render_panel_line(frame: &mut Frame<'_>, area: Rect, line: Line<'_>) {
     frame.render_widget(Paragraph::new(line).style(Style::new().bg(SURFACE)), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{input_display, issue_text};
+
+    #[test]
+    fn multi_path_pastes_are_summarized_by_their_count() {
+        assert_eq!(
+            input_display("a.txt\rb.txt\r"),
+            "2 paths ready; press enter to review"
+        );
+        assert_eq!(
+            input_display("a.txt\r\nb.txt\nc.txt"),
+            "3 paths ready; press enter to review"
+        );
+        assert_eq!(input_display("a.txt"), "a.txt");
+        assert_eq!(input_display(""), "Paste file paths, one per line");
+    }
+
+    #[test]
+    fn a_long_rejected_path_keeps_its_reason_visible() {
+        let text = issue_text(&"x".repeat(200), "the file was not found", 40);
+
+        assert_eq!(text.chars().count(), 40);
+        assert!(text.contains("..."));
+        assert!(text.ends_with("the file was not found"));
+
+        // A path that fits is not touched.
+        assert_eq!(
+            issue_text("/tmp/a.txt", "already selected", 80),
+            "/tmp/a.txt: already selected"
+        );
+    }
 }

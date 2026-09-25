@@ -249,10 +249,7 @@ mod tests {
     }
 
     fn entry(name: &str) -> FileEntry {
-        FileEntry {
-            name: name.to_owned(),
-            size: 1,
-        }
+        FileEntry::new(name.to_owned(), 1)
     }
 
     fn partial_count(root: &Path) -> usize {

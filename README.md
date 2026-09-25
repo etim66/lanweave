@@ -3,22 +3,23 @@
 <!-- SPDX-FileCopyrightText: 2026 Unyime Etim -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-Lanweave is a terminal user interface (TUI) for sending files to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
+Lanweave is a terminal user interface (TUI) for sending files and folders to another device on the same local network. Run `lanweave` to open the app in the current terminal. Lanweave stays open while devices pair, review transfer requests, and send files in either direction.
 
 Lanweave is currently a work in progress. The TUI shell, live discovery, the provisional TLS 1.3 connection, the pairing request and one-time-code authorization flow, separately approved file transfers in either direction, and session lifetime handling (manual close, peer close, 10-minute idle close, and shutdown close) are available. The remaining hardening, cross-platform, and packaging work is being tracked in the [implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) and the design in `docs/`.
 
 ## How It Works
 
 1. Both users run `lanweave`. A device advertises and accepts requests only while Lanweave is running. A stale network record may remain visible briefly after an unclean exit, but connection will fail and the record will expire.
-2. User 1 opens the device list, selects User 2's device, and requests pairing.
-3. User 2 sees the request and accepts or rejects it.
-4. If User 2 accepts, their Lanweave app creates and displays a one-time eight-digit code. User 2 shows that code to User 1.
+2. User 1 opens the device list with `/devices`, selects User 2's device, and requests pairing.
+3. User 2 sees the request and chooses **Accept** or **Reject**.
+4. If User 2 accepts, their Lanweave app creates and displays a one-time eight-digit code. User 2 shares that code with User 1 to authorize the session.
 5. User 1 enters the code. Lanweave checks the code and creates an authenticated, encrypted session between the two devices.
-6. Either user can paste file paths into the TUI, review the files, and select **Send**.
-7. The other user sees a request with the file names, sizes, count, and total size, chooses the destination directory, and can accept or reject it.
-8. Accepted files are sent in order. Each file is checked before it is saved under its final name.
-9. After a transfer, either user can request another transfer in the same session.
-10. Either user can close the session. Lanweave also closes it after 10 minutes with no transfer request or active transfer.
+6. Either user can paste file or folder paths into the TUI, review them, and select **Send**. Folders are compressed into a single zip archive before the request is sent.
+7. The other user sees a request with the names, sizes, count, and total size, including folder item counts, chooses the destination directory, and chooses **Accept** or **Reject** in the same dialog.
+8. Accepted files are sent in order with live per-file progress. Each file is checked before it is saved under its final name.
+9. Both users see a completion summary; the receiver also sees the directory the files were saved to.
+10. After a transfer, either user can request another transfer in the same session, or use the highlighted cancel button (or Escape, or `/cancel`) on a pending or active one.
+11. Either user can close the session. Lanweave also closes it after 10 minutes with no transfer request or active transfer.
 
 Closing the session removes its temporary authorization. The users must repeat the pairing and code flow before sending more files. Lanweave does not keep a trusted-device list.
 
@@ -26,27 +27,34 @@ Closing the session removes its temporary authorization. The users must repeat t
 
 The app is interactive rather than a set of one-shot shell commands.
 
-- Run `lanweave` to open the TUI.
+- Run `lanweave` to open the TUI. It starts on a quiet home screen that points
+  at the available commands instead of opening the device list immediately.
 - Press `q` outside the command palette, or Ctrl+C anywhere, to close Lanweave.
 - Enter `/` to open the command palette. Type to filter, use Up/Down to select,
   Enter to run a command, Backspace to edit, and Escape to close it.
 - Use `/help` to show command and keyboard help.
-- Use `/devices` to open the list of devices currently running Lanweave.
+- Use `/devices` to open the list of devices currently running Lanweave. Each
+  row shows the other computer's name; devices with the same name also show
+  their network host name. Names are untrusted until pairing confirms the live
+  connection.
 - In the device list, use Up/Down to select a device and Enter to connect.
-  Listed device names are untrusted until pairing confirms the live connection.
+  Escape (or `/home`) returns to the home screen.
 - Use `/connect` to enter a `host:port` directly when discovery is unavailable.
   The input validates the address before a connection can start.
-- When the peer's app shows your pairing request, press Enter to accept or
-  Escape to reject it. The peer name and address are untrusted.
-- If the peer accepts, they read the eight-digit code from their screen and you
-  type it: digits to enter, Backspace to edit, Enter to submit, Escape to
+- A request that needs your decision appears as a highlighted dialog with
+  buttons. Use Left/Right to move between **Accept** and **Reject** and press
+  Enter to choose; Escape still rejects directly.
+- When the peer accepts, they read the eight-digit code from their screen and
+  you type it: digits to enter, Backspace to edit, Enter to submit, Escape to
   cancel. The code expires after about two minutes.
-- Use `/send` to review files before a transfer. Paste one path per line (or a
-  quoted path), press Enter to review, Backspace to remove the highlighted
-  file, and Enter again to send.
-- `/send` opens the review list while browsing or in an idle session, but files
-  can only be sent from an authorized idle session. `/disconnect` is available
-  only while connected, and `/quit` closes Lanweave.
+- Use `/send` to review files and folders before a transfer. Paste one path per line (or a quoted path); `file://` URIs, Windows-style CRLF lists, and shell-escaped spaces are also accepted, and pasted paths are reviewed off the event loop so large folders do not block the screen. Press Enter to send, Backspace to remove the highlighted entry, and Escape to close. Pasting with no dialog open opens the review list directly.
+- `/send` opens the review list on the home screen, while browsing, or in an idle
+  session, but files can only be sent from an authorized idle session. `/cancel`
+  (or Escape) cancels a pending or active transfer, including a folder that is
+  still being compressed. A request cancelled before anything is sent returns to
+  the session screen with a notice and keeps the reviewed files queued. Waiting
+  screens show a single highlighted button, so Enter and Escape both cancel.
+  `/disconnect` is available only while connected, and `/quit` closes Lanweave.
 
 The exact command names may change during implementation, but `/` will always show the available actions.
 
@@ -58,7 +66,7 @@ The first release will support:
 - discovery on the local network while the app is running;
 - one active paired session per app;
 - one active transfer request at a time;
-- one or more regular files in each request;
+- one or more regular files or folders in each request, where folders are sent as one zip archive;
 - transfer requests in either direction during a session;
 - separate approval for pairing and for every transfer;
 - encrypted TCP/TLS transport with code-based peer authorization;
@@ -66,7 +74,7 @@ The first release will support:
 - manual session close and a maximum 10-minute idle period; and
 - no accounts, cloud service, background daemon, or trusted devices.
 
-Directories, resume, parallel file transfer, compression, overwrite or rename negotiation, QUIC, mobile clients, and graphical interfaces are outside the MVP.
+Directories are sent only as zip archives; resume, parallel file transfer, overwrite or rename negotiation, QUIC, mobile clients, and graphical interfaces remain outside the MVP.
 
 ## Technical Shape
 

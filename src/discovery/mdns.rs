@@ -242,9 +242,20 @@ impl Drop for MdnsDiscoveryService {
 }
 
 /// Builds the local advertisement for the given listener port.
+///
+/// The service instance is the computer name so peers see a human-readable
+/// device. The host record stays a unique lowercase label because it can
+/// conflict with the platform mDNS responder.
 fn local_service(port: u16) -> anyhow::Result<ServiceInfo> {
-    let label = local_dns_label();
-    service_info(&label, &format!("{label}.local."), port)
+    let hostname = crate::hostname::local_hostname();
+    let instance = crate::hostname::instance_label(&hostname);
+    let instance = if instance.is_empty() {
+        "lanweave".to_owned()
+    } else {
+        instance
+    };
+    let label = dns_label(&hostname, fastrand::u64(..));
+    service_info(&instance, &format!("{label}.local."), port)
 }
 
 /// Builds a version-one advertisement with the given instance and hostname.
@@ -259,14 +270,6 @@ fn service_info(instance: &str, hostname: &str, port: u16) -> anyhow::Result<Ser
     )
     .map(ServiceInfo::enable_addr_auto)
     .map_err(|error| anyhow::anyhow!("failed to build local advertisement: {error}"))
-}
-
-/// Derives a run-specific DNS label from the host name.
-fn local_dns_label() -> String {
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "lanweave".to_owned());
-    dns_label(&host, fastrand::u64(..))
 }
 
 /// Sanitizes `host` into a DNS label and appends `nonce` for uniqueness.
@@ -492,6 +495,23 @@ mod tests {
         assert!(!supports_version(Some(None)));
         assert!(!supports_version(Some(Some(b"01"))));
         assert!(!supports_version(Some(Some(&[0xff]))));
+    }
+
+    #[test]
+    fn advertisement_instance_is_the_sanitized_computer_name() {
+        let label = crate::hostname::instance_label(&crate::hostname::local_hostname());
+        let label = if label.is_empty() {
+            "lanweave".to_owned()
+        } else {
+            label
+        };
+        let service = super::local_service(1234).unwrap();
+
+        assert_eq!(
+            service.get_fullname(),
+            format!("{label}.{SERVICE_TYPE}"),
+            "the advertised instance must be the computer name"
+        );
     }
 
     #[test]

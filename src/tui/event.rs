@@ -128,6 +128,24 @@ fn map_key(key: KeyEvent) -> Option<AppEvent> {
         KeyCode::Down if has_no_command_modifier(key.modifiers) => {
             Some(AppEvent::KeyInput(KeyInput::Down))
         }
+        KeyCode::Left if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Left))
+        }
+        KeyCode::Right if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Right))
+        }
+        KeyCode::PageUp if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::PageUp))
+        }
+        KeyCode::PageDown if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::PageDown))
+        }
+        KeyCode::Home if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Home))
+        }
+        KeyCode::End if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::End))
+        }
         _ => None,
     }
 }
@@ -190,6 +208,12 @@ mod tests {
             (KeyCode::Esc, KeyInput::Escape),
             (KeyCode::Up, KeyInput::Up),
             (KeyCode::Down, KeyInput::Down),
+            (KeyCode::Left, KeyInput::Left),
+            (KeyCode::Right, KeyInput::Right),
+            (KeyCode::PageUp, KeyInput::PageUp),
+            (KeyCode::PageDown, KeyInput::PageDown),
+            (KeyCode::Home, KeyInput::Home),
+            (KeyCode::End, KeyInput::End),
         ];
 
         for (code, input) in cases {

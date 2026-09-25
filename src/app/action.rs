@@ -183,6 +183,8 @@ impl PairingPeer {
 pub(crate) enum UserAction {
     ShowHelp,
     ShowDevices,
+    /// Leaves the device list and returns to the home screen.
+    GoHome,
     SelectDevice(DeviceId),
     ConnectDirect(DirectEndpoint),
     OpenDirectAddress,
@@ -196,6 +198,10 @@ pub(crate) enum UserAction {
     /// Accepts the inbound manifest and stores files under the chosen directory.
     AcceptTransfer(PathBuf),
     RejectTransfer,
+    /// Cancels the pending proposal or active transfer.
+    CancelTransfer,
+    /// Dismisses a finished-transfer summary.
+    DismissSummary,
     Disconnect,
     Quit,
 }
@@ -209,6 +215,12 @@ pub(crate) enum KeyInput {
     Escape,
     Up,
     Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 #[cfg(test)]
