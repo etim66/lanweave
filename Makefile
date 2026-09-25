@@ -8,10 +8,11 @@ BIN        := lanweave
 CARGO      := cargo
 CARGO_AUDIT_VERSION := ^0.22
 CARGO_DENY_VERSION  := ^0.20
+CARGO_DIST_VERSION  := ^0.32
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build run test fmt fmt-check clippy clippy-strict audit deny ci-tools check ci doc clean
+.PHONY: help build run test fmt fmt-check clippy clippy-strict audit deny ci-tools check ci doc clean dist dist-check dist-tools
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "Lanweave targets:\n"} \
@@ -55,6 +56,15 @@ ci: ci-tools fmt-check clippy-strict test audit deny ## Full CI gate, locally
 
 doc: ## Build documentation
 	$(CARGO) doc --all --locked --no-deps
+
+dist: ## Plan the release artifacts (requires cargo-dist)
+	$(CARGO) dist plan
+
+dist-check: ## Verify the generated release workflow is current
+	$(CARGO) dist generate --check
+
+dist-tools: ## Install the pinned cargo-dist
+	cargo install --locked cargo-dist --version "$(CARGO_DIST_VERSION)"
 
 clean: ## Remove build artifacts
 	$(CARGO) clean

@@ -8,6 +8,7 @@ use super::model::{TransferPreparation, TransferProgress, TransferProposal, Tran
 use crate::discovery::DiscoveryEvent;
 use crate::pairing::PairingCode;
 use crate::transfer::selection::{FileSelection, PrepareError};
+use crate::update::UpdateCheck;
 
 /// Inputs consumed by the application runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +45,10 @@ pub(crate) enum AppEvent {
     ProposalRejected,
     /// The transfer completed; both sides show the summary until dismissed.
     TransferCompleted(TransferSummary),
+    /// A release check finished off the event loop.
+    UpdateChecked(UpdateCheck),
+    /// An update finished off the event loop; `Ok` carries the new version.
+    UpdateApplied(Result<String, String>),
     SessionClosed,
     Failed(FailureKind),
     ShutdownRequested,
@@ -63,6 +68,10 @@ pub(crate) enum Effect {
     RejectTransfer,
     /// Cancels the pending local proposal or active transfer.
     CancelTransfer,
+    /// Checks for a newer release without changing anything.
+    CheckForUpdate,
+    /// Installs the newest release.
+    ApplyUpdate,
     Disconnect,
     Shutdown,
 }

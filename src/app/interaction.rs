@@ -14,6 +14,7 @@ use crate::discovery::truncate_utf8;
 use crate::pairing::{CODE_DIGITS, PairingCode};
 use crate::storage::validate_destination;
 use crate::transfer::selection::{FileSelection, MAX_SELECTION_INPUT_BYTES, SelectionIssue};
+use crate::update::UpdateCheck;
 
 /// Maximum size in bytes of the destination path input.
 pub(crate) const MAX_DESTINATION_INPUT_BYTES: usize = 4_096;
@@ -137,6 +138,7 @@ pub(crate) enum Overlay {
     PairingCode(PairingCodeInput),
     FileSelection(FileSelectionInput),
     TransferReview(TransferReviewInput),
+    Update(UpdateInput),
     Help,
 }
 
@@ -187,6 +189,45 @@ impl TransferReviewInput {
             scroll: 0,
         }
     }
+}
+
+/// Live self-update dialog: the current phase and the focused button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateInput {
+    pub(crate) phase: UpdatePhase,
+    pub(crate) focus: DialogFocus,
+}
+
+impl UpdateInput {
+    /// Creates the dialog while a release check is running.
+    fn checking() -> Self {
+        Self {
+            phase: UpdatePhase::Checking,
+            focus: DialogFocus::Accept,
+        }
+    }
+}
+
+/// What the self-update dialog is currently showing.
+///
+/// Version strings come from the release tag; the view escapes them before
+/// display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpdatePhase {
+    /// A release check is running off the event loop.
+    Checking,
+    /// The running version is the newest stable release.
+    UpToDate { current: String },
+    /// This copy was not installed by the release installer.
+    NotManaged,
+    /// A newer release waits for the local decision.
+    Available { current: String, new: String },
+    /// The installer is running.
+    Installing { new: String },
+    /// The new version is on disk; a restart is required to run it.
+    Installed { new: String },
+    /// The check or install failed.
+    Failed { message: String },
 }
 
 /// Scroll position of a file list.
@@ -493,6 +534,44 @@ pub(crate) fn apply_key_input(
             ui.overlay = Some(Overlay::TransferReview(review));
             None
         }
+        Some(Overlay::Update(mut update)) => {
+            let decision = match (&update.phase, input) {
+                (
+                    UpdatePhase::Available { .. } | UpdatePhase::Installed { .. },
+                    KeyInput::Left | KeyInput::Right | KeyInput::Up | KeyInput::Down,
+                ) => {
+                    update.focus.toggle();
+                    None
+                }
+                (UpdatePhase::Available { .. }, KeyInput::Enter) => Some(match update.focus {
+                    DialogFocus::Accept => UserAction::ApplyUpdate,
+                    DialogFocus::Reject => UserAction::DismissUpdate,
+                }),
+                // The finished update offers a restart now or later.
+                (UpdatePhase::Installed { .. }, KeyInput::Enter) => Some(match update.focus {
+                    DialogFocus::Accept => UserAction::Quit,
+                    DialogFocus::Reject => UserAction::DismissUpdate,
+                }),
+                (
+                    UpdatePhase::UpToDate { .. }
+                    | UpdatePhase::NotManaged
+                    | UpdatePhase::Failed { .. },
+                    KeyInput::Enter | KeyInput::Escape,
+                ) => Some(UserAction::DismissUpdate),
+                (
+                    UpdatePhase::Available { .. } | UpdatePhase::Installed { .. },
+                    KeyInput::Escape,
+                ) => Some(UserAction::DismissUpdate),
+                // A running check or install ignores input so its result is
+                // never orphaned.
+                _ => None,
+            };
+            if let Some(action) = decision {
+                return Some(action);
+            }
+            ui.overlay = Some(Overlay::Update(update));
+            None
+        }
         Some(Overlay::Help) => match input {
             KeyInput::Escape => None,
             KeyInput::Character('/') => {
@@ -667,6 +746,43 @@ pub(crate) fn apply_review(
     };
 }
 
+/// Applies a finished release check to the open update dialog.
+///
+/// The result is dropped when the dialog closed or moved past its checking
+/// phase, which can happen after a required prompt takes over the screen.
+pub(crate) fn apply_update_check(ui: &mut UiState, check: UpdateCheck) {
+    let Some(Overlay::Update(update)) = ui.overlay.as_mut() else {
+        return;
+    };
+    if update.phase != UpdatePhase::Checking {
+        return;
+    }
+    update.phase = match check {
+        UpdateCheck::UpToDate { current } => UpdatePhase::UpToDate { current },
+        UpdateCheck::Available { current, new } => UpdatePhase::Available { current, new },
+        UpdateCheck::NotManaged => UpdatePhase::NotManaged,
+        UpdateCheck::Failed(message) => UpdatePhase::Failed { message },
+    };
+    update.focus = DialogFocus::Accept;
+}
+
+/// Applies a finished update to the open update dialog.
+///
+/// The result is dropped when the dialog closed or is no longer installing.
+pub(crate) fn apply_update_result(ui: &mut UiState, result: Result<String, String>) {
+    let Some(Overlay::Update(update)) = ui.overlay.as_mut() else {
+        return;
+    };
+    if !matches!(update.phase, UpdatePhase::Installing { .. }) {
+        return;
+    }
+    update.phase = match result {
+        Ok(new) => UpdatePhase::Installed { new },
+        Err(message) => UpdatePhase::Failed { message },
+    };
+    update.focus = DialogFocus::Accept;
+}
+
 /// Applies an already resolved action to the UI state.
 ///
 /// Returns `true` when the action changed the UI and `false` when it must be
@@ -695,6 +811,27 @@ pub(crate) fn apply_user_action(model: &AppModel, ui: &mut UiState, action: User
             // The list highlight is not carried over to the next visit.
             ui.device_selection = None;
             false
+        }
+        UserAction::CheckForUpdate => {
+            // The model emits the check effect; the UI opens the dialog.
+            ui.overlay = Some(Overlay::Update(UpdateInput::checking()));
+            false
+        }
+        UserAction::ApplyUpdate => {
+            if let Some(Overlay::Update(update)) = ui.overlay.as_mut()
+                && let UpdatePhase::Available { new, .. } = &update.phase
+            {
+                update.phase = UpdatePhase::Installing { new: new.clone() };
+            }
+            false
+        }
+        UserAction::DismissUpdate => {
+            if matches!(ui.overlay, Some(Overlay::Update(_))) {
+                ui.overlay = None;
+                true
+            } else {
+                false
+            }
         }
         _ => false,
     }
@@ -958,7 +1095,8 @@ mod tests {
 
     use super::{
         DialogFocus, FileSelectionInput, MAX_DESTINATION_INPUT_BYTES, Overlay, UiState,
-        apply_key_input, apply_paste, apply_review, apply_user_action, reconcile, take_review_work,
+        UpdatePhase, apply_key_input, apply_paste, apply_review, apply_update_check,
+        apply_update_result, apply_user_action, reconcile, take_review_work,
     };
     use crate::app::action::{DirectAddressError, DirectEndpoint, KeyInput, UserAction};
     use crate::app::event::AppEvent;
@@ -970,6 +1108,7 @@ mod tests {
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::protocol::{FileEntry, TransferRequest};
     use crate::transfer::selection::{FileSelection, MAX_SELECTION_INPUT_BYTES};
+    use crate::update::UpdateCheck;
 
     /// Completes one off-thread review synchronously for tests.
     fn review_pasted(ui: &mut UiState, id: u64) -> bool {
@@ -1881,5 +2020,74 @@ mod tests {
             panic!("the review overlay should remain open");
         };
         assert_eq!(files.selected, Some(1));
+    }
+
+    #[test]
+    fn update_dialog_follows_the_check_and_install_flow() {
+        let model = AppModel::for_test(AppState::Home);
+        let mut ui = UiState::default();
+
+        // Starting a check opens the dialog but leaves the effect to the model.
+        assert!(!apply_user_action(
+            &model,
+            &mut ui,
+            UserAction::CheckForUpdate
+        ));
+        assert!(matches!(ui.overlay(), Some(Overlay::Update(_))));
+
+        // A running check ignores input so its result is never orphaned.
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Escape), None);
+        assert!(matches!(ui.overlay(), Some(Overlay::Update(_))));
+
+        apply_update_check(
+            &mut ui,
+            UpdateCheck::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            },
+        );
+        let Some(Overlay::Update(update)) = ui.overlay() else {
+            panic!("the update dialog must stay open");
+        };
+        assert_eq!(
+            update.phase,
+            UpdatePhase::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            }
+        );
+
+        // Accepting moves the dialog into its installing phase and leaves the
+        // install effect to the model.
+        assert!(!apply_user_action(&model, &mut ui, UserAction::ApplyUpdate));
+        let Some(Overlay::Update(update)) = ui.overlay() else {
+            panic!("the update dialog must stay open");
+        };
+        assert_eq!(
+            update.phase,
+            UpdatePhase::Installing {
+                new: "0.2.0".to_owned(),
+            }
+        );
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Escape), None);
+
+        apply_update_result(&mut ui, Ok("0.2.0".to_owned()));
+        let Some(Overlay::Update(update)) = ui.overlay() else {
+            panic!("the update dialog must stay open");
+        };
+        assert_eq!(
+            update.phase,
+            UpdatePhase::Installed {
+                new: "0.2.0".to_owned(),
+            }
+        );
+
+        // The restart prompt quits only when its primary button is focused.
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Right), None);
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::DismissUpdate)
+        );
+        assert!(ui.overlay().is_none());
     }
 }

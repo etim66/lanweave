@@ -18,6 +18,10 @@ allow = [
     "ISC",
     # Permissive license used by the subtle constant-time primitive library.
     "BSD-3-Clause",
+    # Permissive data license for the Mozilla CA root bundle used by
+    # rustls-platform-verifier through axoupdater's HTTP client. It covers
+    # certificate data, not code, and allows use and redistribution.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

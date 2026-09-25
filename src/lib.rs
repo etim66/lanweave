@@ -15,6 +15,7 @@ mod storage;
 mod transfer;
 mod transport;
 mod tui;
+mod update;
 
 /// Entry points for the `fuzz/` harness build.
 ///

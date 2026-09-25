@@ -54,3 +54,6 @@ The fixed TLS and SPAKE2 composition, certificate verifier, password mapping, de
 - LAN observers can see endpoints, timing, and traffic volume.
 - A compromised endpoint can read files and secrets.
 - Denial of service cannot be fully prevented.
+- `/update` trusts GitHub Releases and release checksums for new binaries, and
+  Windows builds are not code-signed yet. See [Updates](UPDATES.md) for the
+  eligibility rules and the trust model.

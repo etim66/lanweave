@@ -202,6 +202,12 @@ pub(crate) enum UserAction {
     CancelTransfer,
     /// Dismisses a finished-transfer summary.
     DismissSummary,
+    /// Checks for a newer release without installing it.
+    CheckForUpdate,
+    /// Installs the release offered by the update dialog.
+    ApplyUpdate,
+    /// Closes the update dialog without changing anything.
+    DismissUpdate,
     Disconnect,
     Quit,
 }
