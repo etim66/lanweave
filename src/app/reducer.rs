@@ -213,6 +213,17 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             if state == AppState::OutboundProposal {
                 model.defer_outbound();
             }
+            // A request cancelled before any file was sent returns straight to
+            // the session screen with a notice, so cancel never looks ignored.
+            if summary.cancelled && summary.files.is_empty() && !summary.session_closed {
+                model.defer_outbound();
+                model.clear_round();
+                model.set_transfer_notice(
+                    "Transfer cancelled. Use /send to review the files and try again.",
+                );
+                model.transition_to(AppState::SessionIdle);
+                return Vec::new();
+            }
             model.set_summary(summary);
             model.transition_to(AppState::TransferComplete);
             None
@@ -877,6 +888,38 @@ mod tests {
         update(&mut model, AppEvent::User(UserAction::DismissSummary));
         assert_eq!(model.state(), AppState::SessionIdle);
         assert!(model.summary().is_none());
+    }
+
+    #[test]
+    fn cancelling_a_pending_request_returns_to_idle_with_a_notice() {
+        let selection = FileSelection::for_test(&[("report.txt", 64)]);
+        let mut model = model_in(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(selection.clone())),
+        );
+        assert_eq!(model.state(), AppState::OutboundProposal);
+
+        // The session reports a cancelled summary with no verified files: the
+        // request never reached the peer, so there is no summary to dismiss.
+        let cancelled = TransferSummary::new(
+            TransferDirection::Sent,
+            Vec::new(),
+            None,
+            Some("peer".to_owned()),
+            std::time::Duration::ZERO,
+        )
+        .cancelled(false);
+        update(&mut model, AppEvent::TransferCompleted(cancelled));
+
+        assert_eq!(model.state(), AppState::SessionIdle);
+        assert!(model.summary().is_none());
+        assert_eq!(
+            model.transfer_notice(),
+            Some("Transfer cancelled. Use /send to review the files and try again.")
+        );
+        // The untouched files stay queued for another explicit send.
+        assert_eq!(model.deferred_selection(), Some(&selection));
     }
 
     #[test]

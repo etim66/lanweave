@@ -45,9 +45,12 @@ The app is interactive rather than a set of one-shot shell commands.
   you type it: digits to enter, Backspace to edit, Enter to submit, Escape to
   cancel. The code expires after about two minutes.
 - Use `/send` to review files and folders before a transfer. Paste one path per line (or a quoted path); `file://` URIs and shell-escaped spaces are also accepted, and pasted paths are reviewed off the event loop so large folders do not block the screen. Press Enter to send, Backspace to remove the highlighted entry, and Escape to close. Pasting with no dialog open opens the review list directly.
-- `/send` opens the review list while browsing or in an idle session, but files
-  can only be sent from an authorized idle session. `/cancel` (or Escape) cancels
-  a pending or active transfer, including a folder that is still being compressed.
+- `/send` opens the review list on the home screen, while browsing, or in an idle
+  session, but files can only be sent from an authorized idle session. `/cancel`
+  (or Escape) cancels a pending or active transfer, including a folder that is
+  still being compressed. A request cancelled before anything is sent returns to
+  the session screen with a notice and keeps the reviewed files queued. Waiting
+  screens show a single highlighted button, so Enter and Escape both cancel.
   `/disconnect` is available only while connected, and `/quit` closes Lanweave.
 
 The exact command names may change during implementation, but `/` will always show the available actions.
