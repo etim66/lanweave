@@ -12,6 +12,10 @@ pub(super) const MUTED: Color = Color::Rgb(120, 126, 136);
 pub(super) const ACCENT: Color = Color::Rgb(86, 156, 214);
 /// Highlight color for the selected row.
 pub(super) const HIGHLIGHT: Color = Color::Rgb(247, 181, 128);
+/// Success color for completed files and transfers.
+pub(super) const SUCCESS: Color = Color::Rgb(137, 192, 108);
+/// Unfilled part of a progress bar.
+pub(super) const PROGRESS_TRACK: Color = Color::Rgb(64, 64, 64);
 /// Warning color for transitional messages.
 pub(super) const WARNING: Color = Color::Rgb(238, 171, 74);
 /// Error color for failure messages.

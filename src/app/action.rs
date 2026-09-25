@@ -196,6 +196,10 @@ pub(crate) enum UserAction {
     /// Accepts the inbound manifest and stores files under the chosen directory.
     AcceptTransfer(PathBuf),
     RejectTransfer,
+    /// Cancels the pending proposal or active transfer.
+    CancelTransfer,
+    /// Dismisses a finished-transfer summary.
+    DismissSummary,
     Disconnect,
     Quit,
 }

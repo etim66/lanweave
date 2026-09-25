@@ -8,6 +8,7 @@ mod pairing_code;
 mod palette;
 mod presenter;
 mod theme;
+mod transfer;
 mod transfer_review;
 
 use ratatui::Frame;
@@ -99,7 +100,7 @@ mod tests {
         FileSelectionInput, Overlay, TransferReviewInput, UiState, apply_key_input,
         apply_user_action, reconcile,
     };
-    use crate::app::model::{AppModel, AppState, TransferProposal};
+    use crate::app::model::{AppModel, AppState, TransferProgress, TransferProposal};
     use crate::app::reducer::update;
     use crate::discovery::{DiscoveredService, DiscoveryEvent};
     use crate::pairing::PairingCode;
@@ -339,6 +340,41 @@ mod tests {
     }
 
     #[test]
+    fn file_review_shows_a_reviewing_note() {
+        let review = FileSelectionInput {
+            text: "a.txt".to_owned(),
+            reviewing: true,
+            ..FileSelectionInput::default()
+        };
+        let ui = UiState::for_test(Overlay::FileSelection(review));
+        let session = AppModel::for_test(AppState::SessionIdle);
+
+        let output = render_with_ui(&session, &ui, 80, 24);
+        assert!(output.contains("Reviewing pasted paths..."));
+    }
+
+    #[test]
+    fn idle_session_shows_a_preparation_failure_notice() {
+        use crate::transfer::selection::PrepareError;
+
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(FileSelection::for_test(&[(
+                "docs.zip", 1,
+            )]))),
+        );
+        update(
+            &mut model,
+            AppEvent::PreparationFailed(PrepareError::TooLarge),
+        );
+
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("more than 100,000 items"));
+        assert!(output.contains("Use /send"));
+    }
+
+    #[test]
     fn file_review_renders_entries_issues_and_send_state() {
         let review = FileSelectionInput {
             text: String::new(),
@@ -374,14 +410,9 @@ mod tests {
             &mut model,
             AppEvent::IncomingTransferRequest(TransferProposal::new(
                 &TransferRequest::new(vec![
-                    FileEntry {
-                        name: "report.txt".to_owned(),
-                        size: 2048,
-                    },
-                    FileEntry {
-                        name: "photo.jpg".to_owned(),
-                        size: 1,
-                    },
+                    FileEntry::new("report.txt".to_owned(), 2048),
+                    FileEntry::new("photo.jpg".to_owned(), 1),
+                    FileEntry::folder("docs.zip".to_owned(), 1_234, 42, 987_654),
                 ])
                 .unwrap(),
                 Some("peer".to_owned()),
@@ -394,13 +425,15 @@ mod tests {
         assert!(output.contains("Incoming files"));
         assert!(output.contains("report.txt"));
         assert!(output.contains("photo.jpg"));
+        assert!(output.contains("docs.zip"));
+        assert!(output.contains("folder · 42 items"));
         assert!(output.contains("2.0 KiB"));
         assert!(output.contains("From peer"));
         assert!(output.contains("Save to:"));
 
         // Tiny terminals fall back to a single count line.
         let tiny = render_with_ui(&model, &ui, 30, 4);
-        assert!(tiny.contains("2 incoming file(s)"));
+        assert!(tiny.contains("3 incoming file(s)"));
 
         // At six rows the error keeps its reserved row above the destination.
         let mut error_ui = UiState::for_test(Overlay::TransferReview(TransferReviewInput {
@@ -411,6 +444,81 @@ mod tests {
         let small = render_with_ui(&model, &error_ui, 80, 6);
         assert!(small.contains("Enter an existing directory"));
         assert!(small.contains("Save to:"));
+    }
+
+    #[test]
+    fn transfer_panels_render_bars_progress_and_destination() {
+        let selection = FileSelection::for_test(&[("report.txt", 2_048), ("video.mp4", 4_096)]);
+        let mut sending = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut sending,
+            AppEvent::User(UserAction::StartTransfer(selection)),
+        );
+        update(&mut sending, AppEvent::TransferStarted);
+        update(
+            &mut sending,
+            AppEvent::TransferProgress(TransferProgress {
+                index: 0,
+                files: 2,
+                file_size: 2_048,
+                transferred: 1_024,
+                total_size: 6_144,
+                total_transferred: 1_024,
+                elapsed: std::time::Duration::from_secs(2),
+            }),
+        );
+
+        let output = render_to_string(&sending, 80, 24);
+        assert!(output.contains("Sending to"));
+        assert!(output.contains("file 1 of 2"));
+        assert!(output.contains("17%"));
+        assert!(output.contains("report.txt"));
+        assert!(output.contains("video.mp4"));
+        assert!(output.contains('█'));
+
+        let mut receiving = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut receiving,
+            AppEvent::IncomingTransferRequest(TransferProposal::new(
+                &TransferRequest::new(vec![FileEntry::new("report.txt".to_owned(), 2_048)])
+                    .unwrap(),
+                Some("peer".to_owned()),
+            )),
+        );
+        update(
+            &mut receiving,
+            AppEvent::User(UserAction::AcceptTransfer(std::path::PathBuf::from(
+                "/incoming",
+            ))),
+        );
+        update(&mut receiving, AppEvent::TransferStarted);
+
+        let output = render_to_string(&receiving, 80, 24);
+        assert!(output.contains("Receiving from peer"));
+        assert!(output.contains("Saving to: /incoming"));
+    }
+
+    #[test]
+    fn transfer_summary_renders_files_and_destination() {
+        let mut model = AppModel::for_test(AppState::TransferringInbound);
+        update(
+            &mut model,
+            AppEvent::TransferCompleted(crate::app::model::TransferSummary::new(
+                crate::app::model::TransferDirection::Received,
+                vec![FileEntry::new("report.txt".to_owned(), 2_048)],
+                Some(std::path::PathBuf::from("/incoming")),
+                Some("peer".to_owned()),
+                std::time::Duration::from_secs(3),
+            )),
+        );
+
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("Transfer complete"));
+        assert!(output.contains("Received 1 file(s)"));
+        assert!(output.contains("from peer"));
+        assert!(output.contains("report.txt"));
+        assert!(output.contains("Saved to: /incoming"));
+        assert!(output.contains("enter"));
     }
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {

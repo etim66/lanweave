@@ -11,7 +11,11 @@
 | `pairing_outbound` | Request accepted and code succeeds | `session_idle` |
 | `pairing_inbound` | User accepts and pairing succeeds | `session_idle` |
 | `session_idle` | Local user proposes files | `outbound_proposal` |
+| `outbound_proposal` | Folder archive prepared and `transfer_request` sent | `outbound_proposal` |
 | `session_idle` | Peer proposes files | `inbound_proposal` |
+| Transfer finished, or cancelled after `ready` | Both sides show a summary | `transfer_complete` |
+| Transfer cancelled before `ready` | The cancelling side shows a summary; the peer returns to idle | `transfer_complete` |
+| `transfer_complete` | User dismisses the summary | `session_idle` (or `browsing` if the session closed) |
 | Any session state | Session closes or connection fails | `browsing` |
 | Any state | User quits or process shutdown begins | `shutting_down` |
 
@@ -48,6 +52,8 @@ The code exists only after request acceptance. It is memory-only, one-use, allow
 | State | Event and action | Next state |
 | --- | --- | --- |
 | `session_idle` | Local files submitted; send `transfer_request` | `awaiting_transfer_response` |
+| `outbound_proposal` | User cancels during folder preparation; no request is sent | `transfer_complete` |
+| `outbound_proposal` | User cancels before `ready`; send `transfer_cancel` | `transfer_complete` |
 | `session_idle` | Peer `transfer_request` | `reviewing_transfer` |
 | `session_idle` | 600-second idle deadline | `closed` |
 | `awaiting_transfer_response` | Rejected | `session_idle` |
@@ -58,7 +64,8 @@ The code exists only after request acceptance. It is memory-only, one-use, allow
 | `sending_file` | All files receive verified results | `session_idle` |
 | `receiving_file` | All files are verified and results sent | `session_idle` |
 | Any proposal state before `ready` | Safe rejection or `transfer_cancel` | `session_idle` |
-| Any active transfer state | `transfer_cancel` or file failure; clean current partial | `closed` |
+| Any active transfer state | User cancels; send `transfer_cancel`, delete the partial | `closed` |
+| Any active transfer state | Peer `transfer_cancel`; clean the partial, show a cancelled summary | `closed` |
 | Any authorized session state | Local or peer `session_close`; clean an active transfer | `closed` |
 | Any state | Terminal protocol, transport, or internal failure | `closed` |
 

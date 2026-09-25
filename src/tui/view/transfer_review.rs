@@ -111,7 +111,7 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
     if let Some(proposal) = model.transfer_proposal() {
         let shown = usize::from(capacity).min(proposal.files().len());
         for (index, entry) in proposal.files().iter().take(shown).enumerate() {
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     format!("  {} ", index + 1),
                     Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
@@ -121,7 +121,18 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
                     format!("  {}", format_size(entry.size)),
                     Style::new().fg(MUTED),
                 ),
-            ]);
+            ];
+            if let Some(folder) = &entry.folder {
+                spans.push(Span::styled(
+                    format!(
+                        "  folder · {} items · {}",
+                        folder.items,
+                        format_size(folder.source_size)
+                    ),
+                    Style::new().fg(WARNING),
+                ));
+            }
+            let line = Line::from(spans);
             render_panel_line(frame, Rect::new(inner.x, y, inner.width, 1), line);
             y += 1;
         }

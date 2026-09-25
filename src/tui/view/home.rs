@@ -11,6 +11,7 @@ use super::layout::{centered_rect, inset_surface, surface_width};
 use super::presenter::screen_content;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
+use super::transfer;
 
 /// Renders the home screen: brand, state surface, hints, and tip.
 ///
@@ -89,7 +90,11 @@ fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui:
         return;
     }
 
-    if model.screen() == Screen::Browsing {
+    if model.state().is_transfer_active() {
+        transfer::render_panel(frame, area, model);
+    } else if model.state() == AppState::TransferComplete {
+        transfer::render_summary_panel(frame, area, model);
+    } else if model.screen() == Screen::Browsing {
         render_device_panel(frame, area, model, ui);
     } else {
         render_message_panel(frame, area, model);
@@ -97,14 +102,22 @@ fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui:
 }
 
 /// Renders the title and message for a non-browsing screen.
+///
+/// The message may contain newlines; each line is rendered separately so a
+/// multi-sentence prompt never runs together on one row.
 fn render_message_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let (title, message, color) = screen_content(model);
     let top_padding = u16::from(area.height >= 4);
     let inner = inset_surface(area, top_padding);
-    let lines = vec![
-        Line::styled(title, Style::new().fg(color).add_modifier(Modifier::BOLD)),
-        Line::styled(message, Style::new().fg(MUTED)),
-    ];
+    let mut lines = vec![Line::styled(
+        title,
+        Style::new().fg(color).add_modifier(Modifier::BOLD),
+    )];
+    lines.extend(
+        message
+            .lines()
+            .map(|line| Line::styled(line.to_owned(), Style::new().fg(MUTED))),
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::new().bg(SURFACE))
@@ -269,6 +282,24 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled(" submit   ", Style::new().fg(MUTED)),
             Span::styled("esc", Style::new().fg(TEXT)),
             Span::styled(" cancel", Style::new().fg(MUTED)),
+        ],
+        AppState::TransferComplete => vec![
+            Span::styled("enter", Style::new().fg(TEXT)),
+            Span::styled(" dismiss   ", Style::new().fg(MUTED)),
+            Span::styled("/", Style::new().fg(TEXT)),
+            Span::styled(" commands   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
+        ],
+        AppState::OutboundProposal
+        | AppState::TransferringOutbound
+        | AppState::TransferringInbound => vec![
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" cancel   ", Style::new().fg(MUTED)),
+            Span::styled("/", Style::new().fg(TEXT)),
+            Span::styled(" commands   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
         ],
         _ => vec![
             Span::styled("/", Style::new().fg(TEXT)),

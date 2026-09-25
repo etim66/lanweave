@@ -13,6 +13,7 @@ pub(crate) enum CommandId {
     Devices,
     Connect,
     Send,
+    Cancel,
     Disconnect,
     Quit,
 }
@@ -36,7 +37,7 @@ pub(crate) struct CommandSpec {
 }
 
 /// The complete slash command table, in display order.
-const COMMANDS: [CommandSpec; 6] = [
+const COMMANDS: [CommandSpec; 7] = [
     CommandSpec {
         id: CommandId::Help,
         name: "/help",
@@ -64,6 +65,13 @@ const COMMANDS: [CommandSpec; 6] = [
         description: "Review and send files",
         availability: send_availability,
         action: UserAction::OpenFileSelection,
+    },
+    CommandSpec {
+        id: CommandId::Cancel,
+        name: "/cancel",
+        description: "Cancel the pending or active transfer",
+        availability: cancel_availability,
+        action: UserAction::CancelTransfer,
     },
     CommandSpec {
         id: CommandId::Disconnect,
@@ -196,6 +204,15 @@ fn send_availability(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
+/// Availability for the cancel command, which needs a pending or active transfer.
+fn cancel_availability(capabilities: AppCapabilities) -> CommandAvailability {
+    if capabilities.can_cancel_transfer {
+        CommandAvailability::Enabled
+    } else {
+        CommandAvailability::Hidden
+    }
+}
+
 /// Availability for the disconnect command, which needs an active connection.
 fn disconnect_availability(capabilities: AppCapabilities) -> CommandAvailability {
     if capabilities.can_disconnect {
@@ -226,15 +243,16 @@ mod tests {
             .map(|command| command.name)
             .collect::<HashSet<_>>();
 
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands.len(), 7);
         assert_eq!(names.len(), commands.len());
         assert!(commands.iter().all(|command| command.name.starts_with('/')));
         assert_eq!(commands[0].action, UserAction::ShowHelp);
         assert_eq!(commands[1].action, UserAction::ShowDevices);
         assert_eq!(commands[2].action, UserAction::OpenDirectAddress);
         assert_eq!(commands[3].action, UserAction::OpenFileSelection);
-        assert_eq!(commands[4].action, UserAction::Disconnect);
-        assert_eq!(commands[5].action, UserAction::Quit);
+        assert_eq!(commands[4].action, UserAction::CancelTransfer);
+        assert_eq!(commands[5].action, UserAction::Disconnect);
+        assert_eq!(commands[6].action, UserAction::Quit);
     }
 
     #[test]
@@ -282,6 +300,20 @@ mod tests {
                         CommandAvailability::Disabled("Transfer already active")
                     }
                     _ => CommandAvailability::Hidden,
+                },
+                "state: {state:?}"
+            );
+            assert_eq!(
+                availability(CommandId::Cancel),
+                if matches!(
+                    state,
+                    AppState::OutboundProposal
+                        | AppState::TransferringOutbound
+                        | AppState::TransferringInbound
+                ) {
+                    CommandAvailability::Enabled
+                } else {
+                    CommandAvailability::Hidden
                 },
                 "state: {state:?}"
             );

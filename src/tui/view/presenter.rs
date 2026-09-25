@@ -3,6 +3,7 @@ use ratatui::style::Color;
 use crate::app::action::PairingPeer;
 use crate::app::failure::FailureKind;
 use crate::app::model::{AppModel, AppState, Screen};
+use crate::discovery::escape_display;
 
 use super::theme::{ACCENT, ERROR, WARNING};
 
@@ -23,6 +24,7 @@ pub(super) fn status_text(state: AppState) -> &'static str {
         | AppState::InboundProposalAccepted
         | AppState::TransferringOutbound
         | AppState::TransferringInbound => "Transfer",
+        AppState::TransferComplete => "Transfer complete",
         AppState::Error(_) => "Error",
         AppState::ShuttingDown => "Shutting down",
     }
@@ -69,17 +71,37 @@ pub(super) fn screen_content(model: &AppModel) -> (String, String, Color) {
 
 /// Returns the authorized-idle title and message.
 fn session_content(model: &AppModel) -> (String, String, Color) {
-    let mut message = "Use /send to review files and transfer them to the other device.".to_owned();
+    let mut message = match model.transfer_notice() {
+        Some(notice) => format!("{notice}\nUse /send to review the files and try again."),
+        None => "Use /send to review files and transfer them to the other device.".to_owned(),
+    };
     if model.deferred_selection().is_some() {
         message.push_str("\nYour reviewed files are queued; /send restores them for another try.");
     }
-    ("Authorized session".to_owned(), message, ACCENT)
+    let color = if model.transfer_notice().is_some() {
+        WARNING
+    } else {
+        ACCENT
+    };
+    ("Authorized session".to_owned(), message, color)
 }
 
 /// Returns the title and message for each transfer substate.
 fn transfer_content(model: &AppModel) -> (String, String, Color) {
     match model.state() {
         AppState::OutboundProposal => {
+            if let Some(preparation) = model.preparation() {
+                return (
+                    "Compressing folder".to_owned(),
+                    format!(
+                        "Building {} · {}/{} items. Press esc to cancel.",
+                        escape_display(&preparation.name),
+                        preparation.items_done,
+                        preparation.items_total
+                    ),
+                    ACCENT,
+                );
+            }
             let detail = model
                 .outbound_selection()
                 .map(|selection| {

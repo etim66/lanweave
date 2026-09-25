@@ -4,6 +4,7 @@ use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
 
 use crate::app::model::AppModel;
+use crate::discovery::escape_display;
 
 use super::presenter::status_text;
 use super::theme::MUTED;
@@ -48,4 +49,20 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &AppModel)
             inner,
         );
     }
+}
+
+/// Replaces a matching home-directory prefix with `~`.
+///
+/// The displayed path is escaped because local paths may contain control
+/// characters in unusual setups.
+pub(super) fn shorten_home(path: &str) -> String {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let shortened = if !home.is_empty() && path.starts_with(&home) {
+        format!("~{}", &path[home.len()..])
+    } else {
+        path.to_owned()
+    };
+    escape_display(&shortened)
 }

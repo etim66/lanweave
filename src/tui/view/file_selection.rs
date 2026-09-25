@@ -155,14 +155,27 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, input: &FileSelectionInput) {
         } else {
             Style::new().bg(SURFACE).fg(TEXT)
         };
-        let line = Line::from(vec![
-            Span::styled(
-                format!("  {} ", index + 1),
-                row_style.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(escape_display(file.name()), row_style),
-            Span::styled(format!("  {}", format_size(file.size())), row_style),
-        ]);
+        let line = {
+            let mut spans = vec![
+                Span::styled(
+                    format!("  {} ", index + 1),
+                    row_style.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(escape_display(file.name()), row_style),
+                Span::styled(format!("  {}", format_size(file.size())), row_style),
+            ];
+            if let Some(archive) = file.archive() {
+                spans.push(Span::styled(
+                    format!(
+                        "  folder · {} items · {}",
+                        archive.items,
+                        format_size(archive.source_size)
+                    ),
+                    Style::new().fg(WARNING),
+                ));
+            }
+            Line::from(spans)
+        };
         frame.render_widget(
             Paragraph::new(line).style(row_style),
             Rect::new(

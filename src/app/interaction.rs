@@ -379,6 +379,19 @@ pub(crate) fn apply_key_input(
             KeyInput::Character(character) if character.eq_ignore_ascii_case(&'q') => {
                 Some(UserAction::Quit)
             }
+            KeyInput::Enter | KeyInput::Escape if model.state() == AppState::TransferComplete => {
+                Some(UserAction::DismissSummary)
+            }
+            KeyInput::Escape
+                if matches!(
+                    model.state(),
+                    AppState::OutboundProposal
+                        | AppState::TransferringOutbound
+                        | AppState::TransferringInbound
+                ) =>
+            {
+                Some(UserAction::CancelTransfer)
+            }
             // The in-person pairing prompt is decided with Enter and Escape.
             KeyInput::Enter if model.state() == AppState::PairingInbound => {
                 Some(UserAction::AcceptPairing)
@@ -1161,6 +1174,29 @@ mod tests {
         let confirming = AppModel::for_test(AppState::PairingConfirming);
         reconcile(&confirming, &mut ui);
         assert_eq!(ui.overlay(), None);
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_or_active_transfer() {
+        for state in [
+            AppState::OutboundProposal,
+            AppState::TransferringOutbound,
+            AppState::TransferringInbound,
+        ] {
+            let model = AppModel::for_test(state);
+            let mut ui = UiState::default();
+
+            assert_eq!(
+                apply_key_input(&model, &mut ui, KeyInput::Escape),
+                Some(UserAction::CancelTransfer),
+                "state: {state:?}"
+            );
+        }
+
+        // Other states never dispatch a cancel from Escape alone.
+        let idle = AppModel::for_test(AppState::SessionIdle);
+        let mut ui = UiState::default();
+        assert_eq!(apply_key_input(&idle, &mut ui, KeyInput::Escape), None);
     }
 
     #[test]

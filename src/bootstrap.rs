@@ -160,6 +160,9 @@ async fn dispatch_effects(
             Effect::RejectTransfer => {
                 session.send(SessionCommand::RejectTransfer).await?;
             }
+            Effect::CancelTransfer => {
+                session.send(SessionCommand::CancelTransfer).await?;
+            }
         }
     }
 
