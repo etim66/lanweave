@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use crate::app::interaction::UiState;
 use crate::app::model::{AppModel, AppState, Screen};
 
+use super::digits;
 use super::layout::{centered_rect, inset_surface, surface_width};
 use super::presenter::screen_content;
 use super::render_focus_rail;
@@ -31,23 +32,39 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
 
     let compact = area.width < 60 || area.height < 16;
     let browsing = model.screen() == Screen::Browsing;
-    let desired_height = if browsing {
+    let transfer =
+        model.state().is_transfer_active() || model.state() == AppState::TransferComplete;
+    let code_screen = model.state() == AppState::PairingInboundAccepted;
+    let brand_height = if surface_width(area) >= 47 && area.height >= 24 {
+        WORDMARK_HEIGHT
+    } else {
+        1
+    };
+    let base_height: u16 = if browsing || transfer || code_screen {
         18
     } else if compact {
         7
     } else {
         13
     };
-    let stack = centered_rect(area, surface_width(area), desired_height);
+    let stack = centered_rect(
+        area,
+        surface_width(area),
+        base_height.saturating_add(brand_height.saturating_sub(1)),
+    );
 
-    render_brand(frame, Rect::new(stack.x, stack.y, stack.width, 1));
+    render_brand(
+        frame,
+        Rect::new(stack.x, stack.y, stack.width, brand_height),
+    );
 
-    let panel_offset = if compact { 2 } else { 3 };
+    let panel_offset: u16 =
+        (if compact { 2u16 } else { 3u16 }).saturating_add(brand_height.saturating_sub(1));
     let panel_y = stack.y.saturating_add(panel_offset);
     let stack_bottom = stack.y.saturating_add(stack.height);
     let available_height = stack_bottom.saturating_sub(panel_y);
 
-    let panel_height = if browsing {
+    let panel_height = if browsing || transfer || code_screen {
         available_height.saturating_sub(if compact { 1 } else { 2 })
     } else {
         (if compact { 3 } else { 5 }).min(available_height)
@@ -72,13 +89,82 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
     }
 }
 
-/// Renders the two-tone "lanweave" brand line.
+/// Renders the "lanweave" brand: a large block wordmark on roomy terminals.
+///
+/// The wordmark is two-tone like the compact one and falls back to a single
+/// centered line when the terminal is too narrow.
 fn render_brand(frame: &mut Frame<'_>, area: Rect) {
+    if let Some(lines) = wordmark_lines(area.width, area.height) {
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+        return;
+    }
+
     let brand = Line::from(vec![
         Span::styled("lan", Style::new().fg(MUTED).add_modifier(Modifier::BOLD)),
         Span::styled("weave", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
     ]);
     frame.render_widget(Paragraph::new(brand).alignment(Alignment::Center), area);
+}
+
+/// Width of one large wordmark glyph in columns.
+const WORDMARK_GLYPH_WIDTH: u16 = 5;
+/// Height of the large wordmark in rows.
+const WORDMARK_HEIGHT: u16 = 4;
+
+/// Returns the large two-tone wordmark when `area` can hold it.
+///
+/// The word is rendered as "LAN" in the muted tone and "WEAVE" in the bright
+/// tone, matching the compact brand.
+fn wordmark_lines(width: u16, height: u16) -> Option<Vec<Line<'static>>> {
+    const WORD: [char; 8] = ['L', 'A', 'N', 'W', 'E', 'A', 'V', 'E'];
+    const GAP: u16 = 1;
+
+    let required =
+        WORDMARK_GLYPH_WIDTH * u16::try_from(WORD.len()).ok()? + GAP * (WORD.len() as u16 - 1);
+    if width < required || height < WORDMARK_HEIGHT {
+        return None;
+    }
+
+    let mut lines = Vec::with_capacity(usize::from(WORDMARK_HEIGHT));
+    for row in 0..usize::from(WORDMARK_HEIGHT) {
+        let mut spans = Vec::new();
+        for (index, character) in WORD.iter().enumerate() {
+            let glyph = glyph_row(*character, row)?;
+            let style = if index < 3 {
+                Style::new().fg(MUTED).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(TEXT).add_modifier(Modifier::BOLD)
+            };
+            if index > 0 {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(glyph, style));
+        }
+        lines.push(Line::from(spans));
+    }
+    Some(lines)
+}
+
+/// Returns one row of a 5x4 block glyph, or `None` for an unknown character.
+fn glyph_row(character: char, row: usize) -> Option<String> {
+    let bitmap: [u8; 4] = match character {
+        'L' => [0b10000, 0b10000, 0b10000, 0b11110],
+        'A' => [0b01110, 0b10001, 0b11111, 0b10001],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011],
+        'W' => [0b10001, 0b10001, 0b10101, 0b01010],
+        'E' => [0b11111, 0b10000, 0b11110, 0b11111],
+        'V' => [0b10001, 0b10001, 0b01010, 0b00100],
+        _ => return None,
+    };
+    let bits = bitmap.get(row)?;
+    Some(
+        (0..WORDMARK_GLYPH_WIDTH)
+            .map(|column| {
+                let shift = WORDMARK_GLYPH_WIDTH - 1 - column;
+                if bits & (1 << shift) != 0 { '█' } else { ' ' }
+            })
+            .collect(),
+    )
 }
 
 /// Renders the centered surface: device list while browsing, message otherwise.
@@ -94,10 +180,82 @@ fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui:
         transfer::render_panel(frame, area, model);
     } else if model.state() == AppState::TransferComplete {
         transfer::render_summary_panel(frame, area, model);
+    } else if model.state() == AppState::PairingInboundAccepted {
+        render_pairing_code_panel(frame, area, model);
     } else if model.screen() == Screen::Browsing {
         render_device_panel(frame, area, model, ui);
     } else {
         render_message_panel(frame, area, model);
+    }
+}
+
+/// Renders the responder's one-time code in the large digit font.
+///
+/// The code already exists only after local acceptance and never leaves this
+/// device; it is shown large because the other user reads it aloud or types it.
+fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let inner = inset_surface(area, u16::from(area.height >= 4));
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    render_panel_line(
+        frame,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        Line::styled(
+            "Pairing code",
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+    );
+
+    let Some(code) = model.pairing_code() else {
+        return;
+    };
+    let digits: Vec<char> = code.grouped().chars().collect();
+    let glyph_width = u16::try_from(digits::width(digits.len())).unwrap_or(u16::MAX);
+    if glyph_width > inner.width {
+        render_panel_line(
+            frame,
+            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            Line::styled(
+                code.grouped(),
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        );
+        return;
+    }
+
+    let first_row = inner.y.saturating_add(2);
+    for row_index in 0..digits::ROWS {
+        let row_y = first_row.saturating_add(u16::try_from(row_index).unwrap_or(u16::MAX));
+        if row_y >= inner.y + inner.height {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                digits::row(&digits, row_index),
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::new().bg(SURFACE)),
+            Rect::new(inner.x, row_y, inner.width, 1),
+        );
+    }
+
+    if inner.height >= 6 {
+        render_panel_line(
+            frame,
+            Rect::new(inner.x, inner.y + inner.height - 2, inner.width, 1),
+            Line::styled("Type this code on the other device.", Style::new().fg(TEXT)),
+        );
+        render_panel_line(
+            frame,
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            Line::styled(
+                "It expires after about two minutes and is never sent over the connection.",
+                Style::new().fg(MUTED),
+            ),
+        );
     }
 }
 

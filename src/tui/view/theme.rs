@@ -7,9 +7,9 @@ pub(super) const SURFACE: Color = Color::Rgb(30, 30, 30);
 /// Primary foreground text color.
 pub(super) const TEXT: Color = Color::Rgb(220, 220, 220);
 /// Secondary text color for hints and metadata.
-pub(super) const MUTED: Color = Color::Rgb(120, 126, 136);
+pub(super) const MUTED: Color = Color::Rgb(128, 128, 128);
 /// Accent color for titles and interactive elements.
-pub(super) const ACCENT: Color = Color::Rgb(86, 156, 214);
+pub(super) const ACCENT: Color = Color::Rgb(232, 158, 100);
 /// Highlight color for the selected row.
 pub(super) const HIGHLIGHT: Color = Color::Rgb(247, 181, 128);
 /// Success color for completed files and transfers.

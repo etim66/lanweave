@@ -1,4 +1,5 @@
 mod chrome;
+mod digits;
 mod direct_address;
 mod file_selection;
 mod help;
@@ -91,6 +92,7 @@ mod tests {
     use ratatui::style::Color;
     use tokio::time::Instant;
 
+    use super::chrome;
     use super::render;
     use super::theme::{BACKGROUND, HIGHLIGHT, SURFACE};
     use crate::app::action::{DeviceId, KeyInput, PairingPeer, UserAction};
@@ -246,7 +248,7 @@ mod tests {
         assert!(output.contains("peer\\u{000A}name"));
         assert!(output.contains("192.0.2.10:4242"));
 
-        // The responder displays the code grouped and never as a wire value.
+        // The responder displays the code grouped in the large digit font.
         let mut display = prompt.clone();
         update(&mut display, AppEvent::User(UserAction::AcceptPairing));
         update(
@@ -255,7 +257,8 @@ mod tests {
         );
         let output = render_to_string(&display, 80, 24);
         assert!(output.contains("Pairing code"));
-        assert!(output.contains("0123 4567"));
+        assert!(output.contains("Type this code on the other device."));
+        assert!(output.contains('█'));
 
         // The initiator's code entry opens with the accepted response.
         let mut entry = browsing_with(&["peer"]);
@@ -276,7 +279,7 @@ mod tests {
         }
         let output = render_with_ui(&entry, &ui, 80, 24);
         assert!(output.contains("Enter the pairing code"));
-        assert!(output.contains("1234"));
+        assert!(output.contains('█'));
     }
 
     fn browsing_with(names: &[&str]) -> AppModel {
@@ -444,6 +447,31 @@ mod tests {
         let small = render_with_ui(&model, &error_ui, 80, 6);
         assert!(small.contains("Enter an existing directory"));
         assert!(small.contains("Save to:"));
+    }
+
+    #[test]
+    fn large_terminals_show_the_block_wordmark() {
+        let model = browsing_with(&[]);
+        let output = render_to_string(&model, 80, 30);
+
+        assert!(output.contains('█'), "the block wordmark should render");
+        assert!(output.contains("No devices found"));
+    }
+
+    #[test]
+    fn footer_shows_the_working_directory_beside_the_status() {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+
+        let output = render_to_string(&model, 120, 24);
+        let directory = chrome::shorten_home(&model.working_directory().display().to_string());
+        let prefix: String = directory.chars().take(10).collect();
+        assert!(
+            output.contains(&prefix),
+            "the footer must show the opened directory: {output}"
+        );
+        assert!(output.contains("Browsing for devices"));
+        assert!(output.contains("v0.1.0"));
     }
 
     #[test]
