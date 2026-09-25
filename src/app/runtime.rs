@@ -148,8 +148,8 @@ impl AppRuntime {
                 self.start_review();
                 Vec::new()
             }
-            // Update results only affect the local dialog; the model keeps no
-            // update state.
+            // Update results feed the local dialog and the home notice; the
+            // model keeps no update state.
             AppEvent::UpdateChecked(check) => {
                 interaction::apply_update_check(&mut self.ui, check);
                 Vec::new()
@@ -305,6 +305,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert_eq!(
             effect_receiver.recv().await,
             Some(Effect::Connect(
@@ -362,6 +363,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
     }
@@ -387,6 +389,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
     }
@@ -524,6 +527,7 @@ mod tests {
 
         // The reappeared device gets a fresh id (2) and connects once.
         assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert_eq!(
             effect_receiver.recv().await,
             Some(Effect::Connect(
@@ -596,6 +600,7 @@ mod tests {
         let model = runtime.await.unwrap().unwrap();
 
         assert_eq!(model.state(), AppState::ShuttingDown);
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert!(matches!(
             effect_receiver.recv().await,
             Some(Effect::Connect(_))
@@ -621,6 +626,7 @@ mod tests {
         let (event_sender, event_receiver) = event_channel();
         let (effect_sender, mut effect_receiver) = effect_channel();
         let mut phases = Vec::new();
+        let mut notices = Vec::new();
 
         for event in [
             AppEvent::StartupCompleted,
@@ -641,6 +647,7 @@ mod tests {
                 if let Some(Overlay::Update(update)) = ui.overlay() {
                     phases.push(update.phase.clone());
                 }
+                notices.push(ui.update_available().map(str::to_owned));
                 Ok(())
             })
             .await
@@ -659,10 +666,17 @@ mod tests {
             new: "0.2.0".to_owned(),
         }));
 
+        // The startup check and the manual check each request a release query.
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
         assert_eq!(effect_receiver.recv().await, Some(Effect::ApplyUpdate));
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
+
+        // The notice appears when the check names a newer release, then clears
+        // once the install succeeds.
+        assert!(notices.contains(&Some("0.2.0".to_owned())));
+        assert_eq!(notices.last(), Some(&None));
     }
 
     #[tokio::test]

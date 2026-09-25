@@ -269,6 +269,8 @@ impl Default for FileListScroll {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UiState {
     overlay: Option<Overlay>,
+    /// Newer release found by a check, shown as a home-screen notice.
+    update_available: Option<String>,
     device_selection: Option<super::action::DeviceId>,
     /// Scroll position of the active-transfer file list.
     transfer_scroll: FileListScroll,
@@ -289,11 +291,26 @@ impl UiState {
     pub(crate) const fn for_test(overlay: Overlay) -> Self {
         Self {
             overlay: Some(overlay),
+            update_available: None,
             device_selection: None,
             transfer_scroll: FileListScroll::FOLLOWING,
             summary_scroll: 0,
             last_state: None,
         }
+    }
+
+    /// Builds UI state carrying an offered update and no overlay.
+    #[cfg(test)]
+    pub(crate) fn for_test_update(version: &str) -> Self {
+        Self {
+            update_available: Some(version.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// Returns the newer release offered by the last successful check.
+    pub(crate) fn update_available(&self) -> Option<&str> {
+        self.update_available.as_deref()
     }
 
     /// Returns the currently selected device in the browsing list.
@@ -746,11 +763,20 @@ pub(crate) fn apply_review(
     };
 }
 
-/// Applies a finished release check to the open update dialog.
+/// Applies a finished release check to the home notice and the open dialog.
 ///
-/// The result is dropped when the dialog closed or moved past its checking
-/// phase, which can happen after a required prompt takes over the screen.
+/// A newer release is remembered even without the dialog so the home screen
+/// can offer `/update`. A failed check changes nothing: an earlier offer
+/// survives it and a first failure shows no notice. The dialog result is
+/// dropped when the dialog closed or moved past its checking phase, which can
+/// happen after a required prompt takes over the screen.
 pub(crate) fn apply_update_check(ui: &mut UiState, check: UpdateCheck) {
+    match &check {
+        UpdateCheck::Available { new, .. } => ui.update_available = Some(new.clone()),
+        UpdateCheck::UpToDate { .. } | UpdateCheck::NotManaged => ui.update_available = None,
+        UpdateCheck::Failed(_) => {}
+    }
+
     let Some(Overlay::Update(update)) = ui.overlay.as_mut() else {
         return;
     };
@@ -766,10 +792,14 @@ pub(crate) fn apply_update_check(ui: &mut UiState, check: UpdateCheck) {
     update.focus = DialogFocus::Accept;
 }
 
-/// Applies a finished update to the open update dialog.
+/// Applies a finished update to the home notice and the open dialog.
 ///
-/// The result is dropped when the dialog closed or is no longer installing.
+/// A successful install clears the offer; a failure leaves it in place. The
+/// dialog result is dropped when the dialog closed or is no longer installing.
 pub(crate) fn apply_update_result(ui: &mut UiState, result: Result<String, String>) {
+    if result.is_ok() {
+        ui.update_available = None;
+    }
     let Some(Overlay::Update(update)) = ui.overlay.as_mut() else {
         return;
     };
@@ -2089,5 +2119,66 @@ mod tests {
             Some(UserAction::DismissUpdate)
         );
         assert!(ui.overlay().is_none());
+    }
+
+    #[test]
+    fn update_notice_follows_the_latest_check_result() {
+        let mut ui = UiState::default();
+
+        // A newer release is remembered even when no dialog is open.
+        apply_update_check(
+            &mut ui,
+            UpdateCheck::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            },
+        );
+        assert_eq!(ui.update_available(), Some("0.2.0"));
+
+        // A failed check changes nothing, so the offer survives it.
+        apply_update_check(&mut ui, UpdateCheck::Failed("offline".to_owned()));
+        assert_eq!(ui.update_available(), Some("0.2.0"));
+
+        // A managed copy that is current clears an older offer.
+        apply_update_check(
+            &mut ui,
+            UpdateCheck::UpToDate {
+                current: "0.2.0".to_owned(),
+            },
+        );
+        assert_eq!(ui.update_available(), None);
+
+        // The same holds when the running copy cannot update itself.
+        apply_update_check(
+            &mut ui,
+            UpdateCheck::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            },
+        );
+        apply_update_check(&mut ui, UpdateCheck::NotManaged);
+        assert_eq!(ui.update_available(), None);
+
+        // Installing the offered version clears it before the restart.
+        apply_update_check(
+            &mut ui,
+            UpdateCheck::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            },
+        );
+        apply_update_result(&mut ui, Ok("0.2.0".to_owned()));
+        assert_eq!(ui.update_available(), None);
+
+        // A failed install leaves the offer on the home screen.
+        apply_update_check(
+            &mut ui,
+            UpdateCheck::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            },
+        );
+        apply_update_result(&mut ui, Err("install failed".to_owned()));
+        assert_eq!(ui.update_available(), Some("0.2.0"));
     }
 }

@@ -55,5 +55,6 @@ The fixed TLS and SPAKE2 composition, certificate verifier, password mapping, de
 - A compromised endpoint can read files and secrets.
 - Denial of service cannot be fully prevented.
 - `/update` trusts GitHub Releases and release checksums for new binaries, and
-  Windows builds are not code-signed yet. See [Updates](UPDATES.md) for the
+  Windows builds are not code-signed yet. Eligible copies also contact GitHub
+  once at startup for the silent release check. See [Updates](UPDATES.md) for the
   eligibility rules and the trust model.

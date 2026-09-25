@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::app::interaction::UiState;
 use crate::app::model::{AppModel, AppState, Screen};
+use crate::discovery::escape_display;
 
 use super::dialog::{self, Button};
 use super::digits;
@@ -36,6 +37,12 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
     let transfer =
         model.state().is_transfer_active() || model.state() == AppState::TransferComplete;
     let code_screen = model.state() == AppState::PairingInboundAccepted;
+    // The startup release check offers an update on the two idle screens.
+    let notice = match model.screen() {
+        Screen::Home | Screen::Browsing => ui.update_available(),
+        _ => None,
+    };
+    let notice_height = u16::from(notice.is_some());
     let brand_height = if surface_width(area) >= 47 && area.height >= 24 {
         WORDMARK_HEIGHT
     } else {
@@ -51,7 +58,9 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
     let stack = centered_rect(
         area,
         surface_width(area),
-        base_height.saturating_add(brand_height.saturating_sub(1)),
+        base_height
+            .saturating_add(notice_height)
+            .saturating_add(brand_height.saturating_sub(1)),
     );
 
     render_brand(
@@ -59,11 +68,22 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
         Rect::new(stack.x, stack.y, stack.width, brand_height),
     );
 
-    let panel_offset: u16 =
-        (if compact { 2u16 } else { 3u16 }).saturating_add(brand_height.saturating_sub(1));
+    let panel_offset: u16 = (if compact { 2u16 } else { 3u16 })
+        .saturating_add(notice_height)
+        .saturating_add(brand_height.saturating_sub(1));
     let panel_y = stack.y.saturating_add(panel_offset);
     let stack_bottom = stack.y.saturating_add(stack.height);
     let available_height = stack_bottom.saturating_sub(panel_y);
+
+    if let Some(version) = notice
+        && panel_y > stack.y
+    {
+        render_update_notice(
+            frame,
+            Rect::new(stack.x, panel_y.saturating_sub(1), stack.width, 1),
+            version,
+        );
+    }
 
     let panel_height = if browsing || transfer || code_screen {
         available_height.saturating_sub(if compact { 1 } else { 2 })
@@ -110,6 +130,24 @@ fn render_brand(frame: &mut Frame<'_>, area: Rect) {
         Span::styled("weave", Style::new().fg(TEXT).add_modifier(Modifier::BOLD)),
     ]);
     frame.render_widget(Paragraph::new(brand).alignment(Alignment::Center), area);
+}
+
+/// Renders the one-line update notice above the state surface.
+///
+/// The version comes from the release tag and is escaped like every other
+/// remote string.
+fn render_update_notice(frame: &mut Frame<'_>, area: Rect, version: &str) {
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("/update", Style::new().fg(TEXT)),
+            Span::styled(
+                format!(" to install v{}", escape_display(version)),
+                Style::new().fg(MUTED),
+            ),
+        ]))
+        .alignment(Alignment::Center),
+        area,
+    );
 }
 
 /// Width of one large wordmark glyph in columns.

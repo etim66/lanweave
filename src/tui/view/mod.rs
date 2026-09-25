@@ -306,6 +306,31 @@ mod tests {
     }
 
     #[test]
+    fn home_screens_show_the_offered_update_notice() {
+        let mut home = AppModel::new();
+        update(&mut home, AppEvent::StartupCompleted);
+        let ui = UiState::for_test_update("0.2.0");
+
+        let output = render_with_ui(&home, &ui, 80, 24);
+        assert!(output.contains("/update to install v0.2.0"), "{output}");
+
+        // The notice persists on the device list.
+        let mut browsing = home.clone();
+        update(&mut browsing, AppEvent::User(UserAction::ShowDevices));
+        let output = render_with_ui(&browsing, &ui, 80, 24);
+        assert!(output.contains("/update to install v0.2.0"), "{output}");
+
+        // Busy screens do not carry the offer.
+        let session = AppModel::for_test(AppState::SessionIdle);
+        let output = render_with_ui(&session, &ui, 80, 24);
+        assert!(!output.contains("/update"), "{output}");
+
+        // Small terminals still render without panicking.
+        assert!(!render_with_ui(&home, &ui, 32, 12).is_empty());
+        assert!(!render_with_ui(&home, &ui, 1, 1).is_empty());
+    }
+
+    #[test]
     fn pairing_prompt_code_display_and_entry_render() {
         // A hostile display name stays escaped in the prompt.
         let mut prompt = AppModel::new();

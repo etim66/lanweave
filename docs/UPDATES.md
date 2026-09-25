@@ -7,21 +7,32 @@
 explicit confirmation, installs it in place. The new version runs the next time
 Lanweave starts.
 
+On startup, an eligible copy checks once in the background. If a newer stable
+version exists, the home and device-list screens show
+`/update to install vX.Y.Z`; nothing is downloaded by that check. A failed
+startup check is silent and changes nothing.
+
 ## The flow
 
-1. `/update` opens a dialog and checks the latest release on GitHub.
-2. If the running version is current, the dialog says so and closes.
-3. If a newer version exists, the dialog shows both versions and asks for
+1. On startup, an eligible copy silently checks the latest release once and
+   shows `/update to install vX.Y.Z` when a newer stable version exists. The
+   notice stays until that version is installed or the running version becomes
+   current.
+2. `/update` opens a dialog and checks the latest release on GitHub.
+3. If the running version is current, the dialog says so and closes.
+4. If a newer version exists, the dialog shows both versions and asks for
    confirmation. **Cancel** or Escape changes nothing.
-4. **Update** downloads the release installer and runs it against the original
+5. **Update** downloads the release installer and runs it against the original
    install directory. The terminal UI shows an installing note until it
    finishes.
-5. On success the dialog offers **Quit now** or **Later**. Quitting follows the
+6. On success the dialog offers **Quit now** or **Later**. Quitting follows the
    normal shutdown path and restores the terminal; the next launch uses the new
    version.
 
-The check and the install use GitHub only. There is no Lanweave update server
-and no background polling: nothing is contacted until `/update` is run.
+The check and the install use GitHub only. There is no Lanweave update server:
+the only automatic request is the single startup check, and an ineligible copy
+never contacts GitHub at all. The startup check never downloads or changes
+anything; offline, rate-limited, and other failures are silent.
 
 ## Eligibility
 
@@ -37,6 +48,9 @@ The following copies are **not** eligible and show an install hint instead:
 - `cargo install` copies;
 - copies from a distro package manager; and
 - any copy whose install receipt was removed.
+
+Ineligible copies make no startup request and show no notice; running `/update`
+in them explains how to install the latest release manually.
 
 This is deliberate: replacing a binary that another tool installed would leave
 that tool's metadata describing a version that is no longer on disk.
@@ -62,7 +76,8 @@ is never written to disk.
 
 ## Failure behavior
 
-- A failed check reports a short reason and changes nothing.
+- A failed `/update` check reports a short reason and changes nothing; the
+  startup check stays silent and leaves any earlier notice in place.
 - A failed install leaves the current copy untouched. The installer writes the
   new copy before replacing the old one, and Windows keeps a
   `lanweave.exe.previous.exe` copy only long enough to delete it on the next

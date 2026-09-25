@@ -143,7 +143,9 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     let effect = match (model.state(), event) {
         (AppState::Starting, AppEvent::StartupCompleted) => {
             model.transition_to(AppState::Home);
-            None
+            // The first release check runs silently in the background; only a
+            // newer version changes the home screen.
+            Some(Effect::CheckForUpdate)
         }
         (AppState::Home | AppState::Browsing, AppEvent::IncomingPairingRequest(peer)) => {
             model.set_pairing_peer(peer);
@@ -377,7 +379,7 @@ mod tests {
                 AppState::Starting,
                 AppEvent::StartupCompleted,
                 AppState::Home,
-                None,
+                Some(Effect::CheckForUpdate),
             ),
             (
                 AppState::Home,

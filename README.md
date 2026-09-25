@@ -24,7 +24,7 @@ Windows (PowerShell):
 powershell -c "irm https://github.com/etim66/lanweave/releases/latest/download/lanweave-installer.ps1 | iex"
 ```
 
-Run `/update` inside the app to check for and install a newer version. Only copies installed by the installer can update themselves; see [Updates](docs/UPDATES.md) for the details, the uninstall steps, and the trust model.
+Run `/update` inside the app to check for and install a newer version. An installer-managed copy also checks once at startup: if a newer release exists, the home screen shows `/update to install vX.Y.Z`, and a failed check stays silent. Only copies installed by the installer can update themselves; see [Updates](docs/UPDATES.md) for the details, the uninstall steps, and the trust model.
 
 ## Screenshots
 
@@ -65,7 +65,7 @@ Enter `/` to open the command palette. Type to filter, use Up/Down to select, pr
 | `/send` | Opens the review list for files and folders. Paste one path per line (or a quoted path); `file://` URIs, Windows-style CRLF lists, and shell-escaped spaces are also accepted, and pasted paths are reviewed off the event loop so large folders do not block the screen. Press Enter to send, Backspace to remove the highlighted entry, and Escape to close. Pasting with no dialog open opens the review list directly. Available from the home screen, while browsing, or in an idle session, but files can only be sent from an authorized idle session. |
 | `/cancel` | Cancels a pending or active transfer, including a folder that is still being compressed. A request cancelled before anything is sent returns to the session screen with a notice and keeps the reviewed files queued. |
 | `/disconnect` | Closes the session. Available only while connected. |
-| `/update` | Checks for a newer release. When one exists, the app shows its version and asks you to confirm before anything is downloaded; a finished update runs after you restart Lanweave. |
+| `/update` | Checks for a newer release. When one exists, the app shows its version and asks you to confirm before anything is downloaded; a finished update runs after you restart Lanweave. The startup check shows `/update to install vX.Y.Z` on the home screen when a newer release exists, and stays silent when it fails. |
 | `/home` | Returns to the home screen. |
 | `/help` | Shows command and keyboard help. |
 | `/quit` | Closes Lanweave. |
