@@ -217,6 +217,10 @@ pub(crate) enum KeyInput {
     Down,
     Left,
     Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use crate::app::model::{AppModel, AppState, Screen};
 
 use super::dialog::{self, Button};
 use super::digits;
-use super::layout::{centered_rect, inset_surface, surface_width};
+use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
 use super::presenter::screen_content;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
@@ -81,7 +81,12 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
 
     let hints_y = panel_y.saturating_add(panel_height).saturating_add(1);
     if hints_y < stack_bottom {
-        render_hints(frame, Rect::new(stack.x, hints_y, stack.width, 1), model);
+        render_hints(
+            frame,
+            Rect::new(stack.x, hints_y, stack.width, 1),
+            model,
+            ui,
+        );
     }
 
     let tip_y = hints_y.saturating_add(2);
@@ -181,9 +186,9 @@ fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui:
     }
 
     if model.state().is_transfer_active() {
-        transfer::render_panel(frame, area, model);
+        transfer::render_panel(frame, area, model, ui);
     } else if model.state() == AppState::TransferComplete {
-        transfer::render_summary_panel(frame, area, model);
+        transfer::render_summary_panel(frame, area, model, ui);
     } else if model.state() == AppState::PairingInboundAccepted {
         render_pairing_code_panel(frame, area, model);
     } else if model.screen() == Screen::Browsing {
@@ -381,10 +386,11 @@ fn render_device_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: 
             .iter()
             .position(|candidate| candidate.id() == selected)
     });
-    let start = selected_index
-        .unwrap_or(0)
-        .saturating_add(1)
-        .saturating_sub(usize::from(row_capacity));
+    let (start, _) = scroll_window(
+        candidates.len(),
+        selected_index.unwrap_or(0),
+        usize::from(row_capacity),
+    );
 
     for (offset, candidate) in candidates
         .iter()
@@ -472,7 +478,7 @@ fn render_panel_line(frame: &mut Frame<'_>, area: Rect, line: Line<'_>) {
 }
 
 /// Renders the one-line keyboard hints below the state surface.
-fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &UiState) {
     let spans = match model.state() {
         AppState::Home => vec![
             Span::styled("/devices", Style::new().fg(TEXT)),
@@ -537,6 +543,8 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled(" quit", Style::new().fg(MUTED)),
         ],
         AppState::TransferComplete => vec![
+            Span::styled("up/down", Style::new().fg(TEXT)),
+            Span::styled(" scroll   ", Style::new().fg(MUTED)),
             Span::styled("enter", Style::new().fg(TEXT)),
             Span::styled(" dismiss   ", Style::new().fg(MUTED)),
             Span::styled("/", Style::new().fg(TEXT)),
@@ -544,9 +552,27 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled("q", Style::new().fg(TEXT)),
             Span::styled(" quit", Style::new().fg(MUTED)),
         ],
-        AppState::OutboundProposal
-        | AppState::TransferringOutbound
-        | AppState::TransferringInbound => vec![
+        AppState::TransferringOutbound | AppState::TransferringInbound => {
+            let mut spans = vec![
+                Span::styled("up/down", Style::new().fg(TEXT)),
+                Span::styled(" scroll   ", Style::new().fg(MUTED)),
+            ];
+            // The live-follow shortcut only matters once a manual scroll paused it.
+            if !ui.transfer_scroll().follow() {
+                spans.push(Span::styled("end", Style::new().fg(TEXT)));
+                spans.push(Span::styled(" live   ", Style::new().fg(MUTED)));
+            }
+            spans.extend([
+                Span::styled("esc", Style::new().fg(TEXT)),
+                Span::styled(" cancel transfer   ", Style::new().fg(MUTED)),
+                Span::styled("/", Style::new().fg(TEXT)),
+                Span::styled(" commands   ", Style::new().fg(MUTED)),
+                Span::styled("q", Style::new().fg(TEXT)),
+                Span::styled(" quit", Style::new().fg(MUTED)),
+            ]);
+            spans
+        }
+        AppState::OutboundProposal => vec![
             Span::styled("esc", Style::new().fg(TEXT)),
             Span::styled(" cancel transfer   ", Style::new().fg(MUTED)),
             Span::styled("/", Style::new().fg(TEXT)),

@@ -21,7 +21,7 @@ An authorized session is required before file metadata is sent. The requester se
 - checked total size; and
 - the requesting peer's untrusted display name.
 
-The recipient accepts or rejects the whole list. There is no partial approval, remote rename, or overwrite option. A rejection returns both peers to session idle.
+The recipient accepts or rejects the whole list. There is no partial approval, remote rename, or overwrite option. A rejection returns both peers to session idle. Long manifests scroll with the arrow keys, PageUp/PageDown, and Home/End, so every entry can be reviewed before the decision.
 
 ## Manifest
 
@@ -92,6 +92,8 @@ The TUI distinguishes:
 - files confirmed as verified.
 
 Per-file and overall progress bars, average speed, and estimated time left are derived from throttled progress events. Transport writes are not proof that a file was saved. `file_result` is the final file-level result.
+
+The active transfer list follows the file in flight, so the current entry stays visible as files arrive. Scrolling with the arrow keys, PageUp/PageDown, or Home pauses the follow; End returns to the live view. The completed summary scrolls the same way, and the sender and recipient see the same controls.
 
 ## Deferred
 

@@ -8,7 +8,7 @@ use crate::app::interaction::FileSelectionInput;
 use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
-use super::layout::{centered_rect, inset_surface, surface_width};
+use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
 use super::presenter::format_size;
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, ERROR, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
@@ -144,8 +144,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, input: &FileSelectionInput) {
     }
 
     let capacity = usize::from(area.height);
-    let selected = input.selected.unwrap_or(0);
-    let start = selected.saturating_add(1).saturating_sub(capacity);
+    let (start, _) = scroll_window(files.len(), input.selected.unwrap_or(0), capacity);
 
     for (offset, file) in files.iter().skip(start).take(capacity).enumerate() {
         let index = start + offset;

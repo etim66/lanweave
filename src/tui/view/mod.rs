@@ -505,6 +505,7 @@ mod tests {
             destination: "/tmp".to_owned(),
             error: Some("Enter an existing directory"),
             focus: DialogFocus::Accept,
+            scroll: 0,
         }));
         reconcile(&model, &mut error_ui);
         let small = render_with_ui(&model, &error_ui, 80, 6);
@@ -653,6 +654,125 @@ mod tests {
         assert!(output.contains("report.txt"));
         assert!(output.contains("Saved to: /incoming"));
         assert!(output.contains("enter"));
+    }
+
+    #[test]
+    fn active_transfer_keeps_the_current_file_visible() {
+        let names: Vec<String> = (0..12)
+            .map(|index| format!("file-{index:02}.mp4"))
+            .collect();
+        let entries: Vec<(&str, u64)> = names.iter().map(|name| (name.as_str(), 1_024)).collect();
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::User(UserAction::StartTransfer(FileSelection::for_test(&entries))),
+        );
+        update(&mut model, AppEvent::TransferStarted);
+        update(
+            &mut model,
+            AppEvent::TransferProgress(TransferProgress {
+                index: 10,
+                files: 12,
+                file_size: 1_024,
+                transferred: 512,
+                total_size: 12_288,
+                total_transferred: 6_000,
+                elapsed: std::time::Duration::from_secs(2),
+            }),
+        );
+
+        // The window follows the live file instead of starting at file one.
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("file 11 of 12"));
+        assert!(
+            output.contains("file-10.mp4"),
+            "the live file must be visible: {output}"
+        );
+        assert!(!output.contains("file-00.mp4"));
+
+        // A manual scroll pauses the follow and shows the live shortcut.
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::Up), None);
+        let scrolled = render_with_ui(&model, &ui, 80, 24);
+        assert!(scrolled.contains("file-09.mp4"));
+        assert!(
+            scrolled.contains("live"),
+            "paused scroll offers End: {scrolled}"
+        );
+
+        // End returns to the live view with the current file visible again.
+        assert_eq!(apply_key_input(&model, &mut ui, KeyInput::End), None);
+        let resumed = render_with_ui(&model, &ui, 80, 24);
+        assert!(resumed.contains("file-10.mp4"));
+    }
+
+    #[test]
+    fn inbound_review_scrolls_to_later_manifest_entries() {
+        let entries: Vec<FileEntry> = (0..12)
+            .map(|index| FileEntry::new(format!("photo-{index:02}.jpg"), 1))
+            .collect();
+        let mut model = AppModel::for_test(AppState::SessionIdle);
+        update(
+            &mut model,
+            AppEvent::IncomingTransferRequest(TransferProposal::new(
+                &TransferRequest::new(entries).unwrap(),
+                Some("peer".to_owned()),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("photo-00.jpg"));
+        assert!(!output.contains("photo-11.jpg"));
+
+        for _ in 0..10 {
+            apply_key_input(&model, &mut ui, KeyInput::Down);
+        }
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(
+            output.contains("photo-10.jpg"),
+            "scrolling must reach later entries: {output}"
+        );
+        assert!(!output.contains("photo-00.jpg"));
+        assert!(!output.contains("photo-11.jpg"));
+
+        apply_key_input(&model, &mut ui, KeyInput::End);
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("photo-11.jpg"));
+    }
+
+    #[test]
+    fn transfer_summary_scrolls_to_later_files() {
+        let entries: Vec<FileEntry> = (0..12)
+            .map(|index| FileEntry::new(format!("doc-{index:02}.pdf"), 1))
+            .collect();
+        let mut model = AppModel::for_test(AppState::TransferringInbound);
+        update(
+            &mut model,
+            AppEvent::TransferCompleted(crate::app::model::TransferSummary::new(
+                crate::app::model::TransferDirection::Received,
+                entries,
+                None,
+                Some("peer".to_owned()),
+                std::time::Duration::from_secs(3),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("doc-00.pdf"));
+        assert!(!output.contains("doc-11.pdf"));
+
+        apply_key_input(&model, &mut ui, KeyInput::End);
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(
+            output.contains("doc-11.pdf"),
+            "End must reach the last file: {output}"
+        );
+        assert!(!output.contains("doc-00.pdf"));
     }
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {

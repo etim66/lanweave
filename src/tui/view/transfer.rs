@@ -4,19 +4,22 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::app::interaction::UiState;
 use crate::app::model::{AppModel, AppState, TransferDirection, TransferProgress};
 use crate::discovery::escape_display;
 
 use super::chrome::shorten_home;
 use super::dialog::{self, Button};
-use super::layout::inset_surface;
+use super::layout::{inset_surface, scroll_window};
 use super::presenter::format_size;
-use super::theme::{ACCENT, MUTED, PROGRESS_TRACK, SUCCESS, SURFACE, TEXT, WARNING};
+use super::theme::{
+    ACCENT, BACKGROUND, HIGHLIGHT, MUTED, PROGRESS_TRACK, SUCCESS, SURFACE, TEXT, WARNING,
+};
 
 /// Renders the active-transfer panel: overall bar, current file, and list.
 ///
 /// The surrounding surface and focus rail are drawn by the caller.
-pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &UiState) {
     let inner = inset_surface(area, u16::from(area.height >= 4));
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -79,11 +82,21 @@ pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) 
     let capacity = (inner.y + inner.height)
         .saturating_sub(y)
         .saturating_sub(button_rows);
+    // Following anchors the list to the current file; a manual scroll uses the
+    // stored cursor until End returns to the live view.
+    let cursor = if ui.transfer_scroll().follow() {
+        model
+            .transfer_progress()
+            .map_or(0, |progress| usize::from(progress.index))
+    } else {
+        ui.transfer_scroll().cursor()
+    };
     render_file_rows(
         frame,
         Rect::new(inner.x, y, inner.width, capacity),
         &files,
         model.transfer_progress(),
+        cursor,
     );
     if button_rows > 0 {
         dialog::render_buttons(
@@ -95,7 +108,12 @@ pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) 
 }
 
 /// Renders the finished-transfer summary for both participants.
-pub(super) fn render_summary_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+pub(super) fn render_summary_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &AppModel,
+    ui: &UiState,
+) {
     let inner = inset_surface(area, u16::from(area.height >= 4));
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -161,42 +179,48 @@ pub(super) fn render_summary_panel(frame: &mut Frame<'_>, area: Rect, model: &Ap
         ),
     );
 
-    if list_end > list_start {
-        for (index, entry) in summary
-            .files
-            .iter()
-            .take(usize::from(list_end - list_start))
-            .enumerate()
-        {
-            let mut spans = vec![
-                Span::styled(" ✓ ", Style::new().fg(SUCCESS)),
-                Span::styled(escape_display(&entry.name), Style::new().fg(TEXT)),
-                Span::styled(
-                    format!("  {}", format_size(entry.size)),
-                    Style::new().fg(MUTED),
+    let capacity = usize::from(list_end.saturating_sub(list_start));
+    let (start, cursor) = scroll_window(summary.files.len(), ui.summary_scroll(), capacity);
+    for (offset, entry) in summary.files.iter().skip(start).take(capacity).enumerate() {
+        let highlighted = start + offset == cursor;
+        let row_style = if highlighted {
+            Style::new().bg(HIGHLIGHT).fg(BACKGROUND)
+        } else {
+            Style::new().bg(SURFACE).fg(TEXT)
+        };
+        let muted_style = if highlighted {
+            row_style
+        } else {
+            Style::new().fg(MUTED)
+        };
+        let mut spans = vec![
+            Span::styled(" ✓ ", row_style),
+            Span::styled(escape_display(&entry.name), row_style),
+            Span::styled(format!("  {}", format_size(entry.size)), muted_style),
+        ];
+        if let Some(folder) = &entry.folder {
+            spans.push(Span::styled(
+                format!(
+                    "  folder · {} items · {}",
+                    folder.items,
+                    format_size(folder.source_size)
                 ),
-            ];
-            if let Some(folder) = &entry.folder {
-                spans.push(Span::styled(
-                    format!(
-                        "  folder · {} items · {}",
-                        folder.items,
-                        format_size(folder.source_size)
-                    ),
-                    Style::new().fg(WARNING),
-                ));
-            }
-            render_panel_line(
-                frame,
-                Rect::new(
-                    inner.x,
-                    list_start + u16::try_from(index).unwrap_or(u16::MAX),
-                    inner.width,
-                    1,
-                ),
-                Line::from(spans),
-            );
+                if highlighted {
+                    row_style
+                } else {
+                    Style::new().fg(WARNING)
+                },
+            ));
         }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(row_style),
+            Rect::new(
+                inner.x,
+                list_start + u16::try_from(offset).unwrap_or(u16::MAX),
+                inner.width,
+                1,
+            ),
+        );
     }
 
     let bottom = inner.y + inner.height;
@@ -255,12 +279,13 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, progress: &TransferProgress)
     );
 }
 
-/// Renders manifest rows with a per-file bar for the current entry.
+/// Renders manifest rows scrolled around `cursor` with the current-file bar.
 fn render_file_rows(
     frame: &mut Frame<'_>,
     area: Rect,
     files: &[(String, u64)],
     progress: Option<TransferProgress>,
+    cursor: usize,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -274,42 +299,63 @@ fn render_file_rows(
         return;
     }
 
-    let current = progress.map(|progress| progress.index);
-    for (index, (name, size)) in files.iter().take(usize::from(area.height)).enumerate() {
-        let index = u16::try_from(index).unwrap_or(u16::MAX);
-        let (marker, marker_style) = match current {
-            Some(current) if index < current => ("✓", Style::new().fg(SUCCESS)),
-            Some(current) if index == current => ("▶", Style::new().fg(ACCENT)),
-            _ => ("·", Style::new().fg(MUTED)),
+    let capacity = usize::from(area.height);
+    let (start, cursor) = scroll_window(files.len(), cursor, capacity);
+    let current = progress.map(|progress| usize::from(progress.index));
+    for (offset, (name, size)) in files.iter().skip(start).take(capacity).enumerate() {
+        let index = start + offset;
+        let highlighted = index == cursor;
+        let row_style = if highlighted {
+            Style::new().bg(HIGHLIGHT).fg(BACKGROUND)
+        } else {
+            Style::new().bg(SURFACE).fg(TEXT)
+        };
+        let muted_style = if highlighted {
+            row_style
+        } else {
+            Style::new().fg(MUTED)
+        };
+        let (marker, marker_color) = match current {
+            Some(current) if index < current => ("✓", SUCCESS),
+            Some(current) if index == current => ("▶", ACCENT),
+            _ => ("·", MUTED),
+        };
+        let marker_style = if highlighted {
+            row_style.add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(marker_color).add_modifier(Modifier::BOLD)
         };
         let mut spans = vec![
-            Span::styled(
-                format!(" {:>2} ", u32::from(index) + 1),
-                Style::new().fg(MUTED),
-            ),
-            Span::styled(
-                format!("{marker} "),
-                marker_style.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(escape_display(name), Style::new().fg(TEXT)),
-            Span::styled(format!("  {}", format_size(*size)), Style::new().fg(MUTED)),
+            Span::styled(format!(" {:>2} ", index + 1), muted_style),
+            Span::styled(format!("{marker} "), marker_style),
+            Span::styled(escape_display(name), row_style),
+            Span::styled(format!("  {}", format_size(*size)), muted_style),
         ];
         if let Some(progress) = progress
-            && index == progress.index
+            && Some(index) == current
         {
             let ratio = ratio(progress.transferred, progress.file_size);
             spans.push(Span::styled(
                 format!("  {}", bar_text(ratio, 12)),
-                Style::new().fg(ACCENT),
+                if highlighted {
+                    row_style
+                } else {
+                    Style::new().fg(ACCENT)
+                },
             ));
             spans.push(Span::styled(
                 format!(" {:>3}%", (ratio * 100.0).round() as u32),
-                Style::new().fg(MUTED),
+                muted_style,
             ));
         }
         frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(Style::new().bg(SURFACE)),
-            Rect::new(area.x, area.y + index, area.width, 1),
+            Paragraph::new(Line::from(spans)).style(row_style),
+            Rect::new(
+                area.x,
+                area.y + u16::try_from(offset).unwrap_or(u16::MAX),
+                area.width,
+                1,
+            ),
         );
     }
 }

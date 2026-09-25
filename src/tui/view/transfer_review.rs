@@ -9,10 +9,10 @@ use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
 use super::dialog::{self, Button};
-use super::layout::{centered_rect, inset_surface, surface_width};
+use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
 use super::presenter::format_size;
 use super::render_focus_rail;
-use super::theme::{ACCENT, ERROR, MUTED, SURFACE, TEXT, WARNING};
+use super::theme::{ACCENT, BACKGROUND, ERROR, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
 
 /// Renders the inbound transfer review: manifest, destination, and decision.
 ///
@@ -63,6 +63,8 @@ pub(super) fn render(
                 Span::styled(" choose   ", Style::new().fg(MUTED)),
                 Span::styled("enter", Style::new().fg(TEXT)),
                 Span::styled(" select   ", Style::new().fg(MUTED)),
+                Span::styled("up/down", Style::new().fg(TEXT)),
+                Span::styled(" scroll   ", Style::new().fg(MUTED)),
                 Span::styled("esc", Style::new().fg(TEXT)),
                 Span::styled(" reject", Style::new().fg(MUTED)),
             ])),
@@ -120,20 +122,30 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
     }
 
     // The footer rows are reserved even when nothing else fits.
-    let capacity = list_end.saturating_sub(y);
+    let capacity = usize::from(list_end.saturating_sub(y));
     if let Some(proposal) = model.transfer_proposal() {
-        let shown = usize::from(capacity).min(proposal.files().len());
-        for (index, entry) in proposal.files().iter().take(shown).enumerate() {
+        let files = proposal.files();
+        let (start, cursor) = scroll_window(files.len(), input.scroll, capacity);
+        for (offset, entry) in files.iter().skip(start).take(capacity).enumerate() {
+            let index = start + offset;
+            let highlighted = index == cursor;
+            let row_style = if highlighted {
+                Style::new().bg(HIGHLIGHT).fg(BACKGROUND)
+            } else {
+                Style::new().bg(SURFACE).fg(TEXT)
+            };
+            let muted_style = if highlighted {
+                row_style
+            } else {
+                Style::new().fg(MUTED)
+            };
             let mut spans = vec![
                 Span::styled(
                     format!("  {} ", index + 1),
-                    Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
+                    row_style.add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(escape_display(&entry.name), Style::new().fg(TEXT)),
-                Span::styled(
-                    format!("  {}", format_size(entry.size)),
-                    Style::new().fg(MUTED),
-                ),
+                Span::styled(escape_display(&entry.name), row_style),
+                Span::styled(format!("  {}", format_size(entry.size)), muted_style),
             ];
             if let Some(folder) = &entry.folder {
                 spans.push(Span::styled(
@@ -142,22 +154,18 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
                         folder.items,
                         format_size(folder.source_size)
                     ),
-                    Style::new().fg(WARNING),
+                    if highlighted {
+                        row_style
+                    } else {
+                        Style::new().fg(WARNING)
+                    },
                 ));
             }
-            let line = Line::from(spans);
-            render_panel_line(frame, Rect::new(inner.x, y, inner.width, 1), line);
-            y += 1;
-        }
-        if shown < proposal.files().len() && y < list_end {
-            render_panel_line(
-                frame,
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)).style(row_style),
                 Rect::new(inner.x, y, inner.width, 1),
-                Line::styled(
-                    format!("  … and {} more", proposal.files().len() - shown),
-                    Style::new().fg(MUTED),
-                ),
             );
+            y += 1;
         }
     }
 
