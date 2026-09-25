@@ -114,10 +114,16 @@ impl DiscoveredService {
     /// Builds a minimal valid service for tests.
     #[cfg(test)]
     pub(crate) fn for_test(name: &str, observed_at: Instant) -> Self {
+        Self::for_test_named(name, name, observed_at)
+    }
+
+    /// Builds a valid service with an instance and display name for tests.
+    #[cfg(test)]
+    pub(crate) fn for_test_named(instance: &str, display_name: &str, observed_at: Instant) -> Self {
         Self::new(
-            format!("{name}.{SERVICE_TYPE}"),
-            text::escape_display(name),
-            format!("{name}.local."),
+            format!("{instance}.{SERVICE_TYPE}"),
+            text::escape_display(display_name),
+            format!("{instance}.local."),
             vec![ScopedAddress::new(
                 IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
                 InterfaceScope::new("loopback", 1),

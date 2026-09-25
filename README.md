@@ -33,9 +33,11 @@ The app is interactive rather than a set of one-shot shell commands.
 - Enter `/` to open the command palette. Type to filter, use Up/Down to select,
   Enter to run a command, Backspace to edit, and Escape to close it.
 - Use `/help` to show command and keyboard help.
-- Use `/devices` to open the list of devices currently running Lanweave.
+- Use `/devices` to open the list of devices currently running Lanweave. Each
+  row shows the other computer's name; devices with the same name also show
+  their network host name. Names are untrusted until pairing confirms the live
+  connection.
 - In the device list, use Up/Down to select a device and Enter to connect.
-  Listed device names are untrusted until pairing confirms the live connection.
 - Use `/connect` to enter a `host:port` directly when discovery is unavailable.
   The input validates the address before a connection can start.
 - A request that needs your decision appears as a highlighted dialog with

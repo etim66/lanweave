@@ -327,13 +327,52 @@ mod tests {
         assert!(output.contains("alpha"));
         assert!(output.contains("zeta"));
         assert!(output.find("alpha").unwrap() < output.find("zeta").unwrap());
-        assert!(output.contains(":4242"));
+        // Only the friendly name is shown for uniquely named devices.
+        assert!(!output.contains(":4242"));
+        assert!(!output.contains("alpha.local."));
         assert!(output.contains("untrusted"));
 
         let mut ui = UiState::default();
         apply_key_input(&model, &mut ui, KeyInput::Down);
         let backgrounds = render_backgrounds_with_ui(&model, &ui, 80, 24);
         assert!(backgrounds.contains(&HIGHLIGHT));
+    }
+
+    #[test]
+    fn devices_with_the_same_name_show_their_host_to_tell_them_apart() {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+        update(&mut model, AppEvent::User(UserAction::ShowDevices));
+        for instance in ["peer-one", "peer-two"] {
+            update(
+                &mut model,
+                AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test_named(
+                    instance,
+                    "peer",
+                    Instant::now(),
+                ))),
+            );
+        }
+
+        let output = render_to_string(&model, 80, 24);
+        assert!(output.contains("peer-one.local."));
+        assert!(output.contains("peer-two.local."));
+    }
+
+    #[test]
+    fn waiting_screens_show_their_cancel_button() {
+        let mut waiting = browsing_with(&["peer"]);
+        update(
+            &mut waiting,
+            AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
+        );
+        let output = render_to_string(&waiting, 80, 24);
+        assert!(output.contains("Waiting for response"));
+        assert!(output.contains("Cancel request"));
+        assert!(!output.contains("127.0.0.1:4242"), "the address is noise");
+
+        let output = render_to_string(&AppModel::for_test(AppState::OutboundProposal), 80, 24);
+        assert!(output.contains("Cancel transfer"));
     }
 
     #[test]

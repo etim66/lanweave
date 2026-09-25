@@ -389,6 +389,12 @@ fn render_device_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: 
         .take(usize::from(row_capacity))
         .enumerate()
     {
+        let name = candidate.display_name().to_ascii_lowercase();
+        let ambiguous = candidates
+            .iter()
+            .filter(|other| other.display_name().to_ascii_lowercase() == name)
+            .count()
+            > 1;
         render_device_row(
             frame,
             Rect::new(
@@ -399,6 +405,7 @@ fn render_device_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: 
             ),
             candidate,
             selected == Some(candidate.id()),
+            ambiguous,
         );
     }
 
@@ -418,11 +425,16 @@ fn render_device_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: 
 }
 
 /// Renders one device row with the selection highlight.
+///
+/// Only the friendly computer name is shown, because the advertised host is a
+/// lowercase label with a run-specific suffix. Devices that share a name get
+/// the host appended in muted text so they can still be told apart.
 fn render_device_row(
     frame: &mut Frame<'_>,
     area: Rect,
     candidate: &crate::discovery::Candidate,
     is_selected: bool,
+    ambiguous: bool,
 ) {
     let row_style = if is_selected {
         Style::new().bg(HIGHLIGHT).fg(BACKGROUND)
@@ -431,21 +443,24 @@ fn render_device_row(
     };
     let name_style = row_style.add_modifier(Modifier::BOLD);
 
-    let line = if area.width >= 40 {
-        Line::from(vec![
-            Span::styled(format!("  {}", candidate.display_name()), name_style),
-            Span::styled(
-                format!("  {}:{}", candidate.host(), candidate.port()),
-                row_style,
-            ),
-        ])
+    let display_name = if candidate.display_name().is_empty() {
+        "Unnamed device"
     } else {
-        Line::from(Span::styled(
-            format!("  {}", candidate.display_name()),
-            name_style,
-        ))
+        candidate.display_name()
     };
-    frame.render_widget(Paragraph::new(line).style(row_style), area);
+    let mut spans = vec![Span::styled(format!("  {display_name}"), name_style)];
+    if ambiguous && area.width >= 40 {
+        let detail_style = if is_selected {
+            Style::new().bg(HIGHLIGHT).fg(BACKGROUND)
+        } else {
+            Style::new().fg(MUTED)
+        };
+        spans.push(Span::styled(
+            format!("  {}", candidate.host()),
+            detail_style,
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(row_style), area);
 }
 
 /// Renders one background-filled line inside the device panel.
