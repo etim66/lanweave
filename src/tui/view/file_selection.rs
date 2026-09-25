@@ -177,6 +177,12 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, input: &FileSelectionInput) {
 
 /// Describes whether the reviewed files can be sent right now.
 fn status_line(model: &AppModel, input: &FileSelectionInput) -> Line<'static> {
+    if input.is_reviewing() {
+        return Line::styled(
+            "Reviewing pasted paths...",
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        );
+    }
     if input.selection.is_empty() {
         return Line::styled(
             "Paste or type file paths, then press enter.",

@@ -348,6 +348,7 @@ mod tests {
                 "the file was not found",
             )],
             selected: Some(0),
+            ..FileSelectionInput::default()
         };
         let ui = UiState::for_test(Overlay::FileSelection(review));
 

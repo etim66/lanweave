@@ -7,6 +7,7 @@ use super::event::{AppEvent, Effect};
 use super::interaction::{self, UiState};
 use super::model::{AppModel, AppState};
 use super::reducer::{MAX_EFFECTS_PER_EVENT, update};
+use crate::transfer::selection::{FileSelection, SelectionIssue};
 
 /// Capacity of the application event channel.
 pub const APP_EVENT_CHANNEL_CAPACITY: usize = 32;
@@ -28,6 +29,13 @@ pub fn effect_channel() -> (EffectSender, EffectReceiver) {
     mpsc::channel(APP_EFFECT_CHANNEL_CAPACITY)
 }
 
+/// A finished off-thread review waiting to be applied to the UI.
+struct ReviewedPaths {
+    id: u64,
+    selection: FileSelection,
+    issues: Vec<SelectionIssue>,
+}
+
 /// Owns the event receiver and is the only runtime component that mutates the
 /// application model.
 pub struct AppRuntime {
@@ -35,16 +43,25 @@ pub struct AppRuntime {
     ui: UiState,
     events: EventReceiver,
     effects: EffectSender,
+    /// Results of off-thread path reviews.
+    reviews: mpsc::UnboundedReceiver<ReviewedPaths>,
+    /// Kept so the review receiver never closes while the runtime lives.
+    review_sender: mpsc::UnboundedSender<ReviewedPaths>,
+    next_review_id: u64,
 }
 
 impl AppRuntime {
     /// Creates a runtime with a fresh model and empty UI state.
     pub fn new(events: EventReceiver, effects: EffectSender) -> Self {
+        let (review_sender, reviews) = mpsc::unbounded_channel();
         Self {
             model: AppModel::new(),
             ui: UiState::default(),
             events,
             effects,
+            reviews,
+            review_sender,
+            next_review_id: 0,
         }
     }
 
@@ -70,7 +87,23 @@ impl AppRuntime {
             return Err(error);
         }
 
-        while let Some(event) = self.events.recv().await {
+        loop {
+            let event = tokio::select! {
+                event = self.events.recv() => event,
+                reviewed = self.reviews.recv() => {
+                    if let Some(reviewed) = reviewed {
+                        self.apply_review(reviewed);
+                        if let Err(error) = observe(&self.model, &self.ui) {
+                            self.shutdown_after_observer_error().await;
+                            return Err(error);
+                        }
+                    }
+                    continue;
+                }
+            };
+            let Some(event) = event else {
+                break;
+            };
             let effects = self.reduce(event);
             if let Err(error) = observe(&self.model, &self.ui) {
                 if self.model.state() == AppState::ShuttingDown {
@@ -111,7 +144,8 @@ impl AppRuntime {
             }
             AppEvent::User(action) => self.apply_user_action(action),
             AppEvent::Paste(text) => {
-                interaction::apply_paste(&mut self.ui, &text);
+                interaction::apply_paste(&self.model, &mut self.ui, &text);
+                self.start_review();
                 Vec::new()
             }
             event => update(&mut self.model, event),
@@ -124,6 +158,39 @@ impl AppRuntime {
         }
         debug_assert!(effects.len() <= MAX_EFFECTS_PER_EVENT);
         effects
+    }
+
+    /// Takes pending pasted paths and reviews them on the blocking pool.
+    ///
+    /// The overlay stays open with a reviewing note; the finished result comes
+    /// back through `self.reviews` so the event loop never blocks on the disk.
+    fn start_review(&mut self) {
+        let id = self.next_review_id.wrapping_add(1);
+        self.next_review_id = id;
+        let Some((base, text)) = interaction::take_review_work(&mut self.ui, id) else {
+            return;
+        };
+        let sender = self.review_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut selection = base;
+            let issues = selection.add_text(&text);
+            let _ = sender.send(ReviewedPaths {
+                id,
+                selection,
+                issues,
+            });
+        });
+    }
+
+    /// Applies one finished review and starts the next pending one.
+    fn apply_review(&mut self, reviewed: ReviewedPaths) {
+        interaction::apply_review(
+            &mut self.ui,
+            reviewed.id,
+            reviewed.selection,
+            reviewed.issues,
+        );
+        self.start_review();
     }
 
     /// Applies an action to the UI first, forwarding it to the model when the
@@ -462,6 +529,12 @@ mod tests {
 
     #[tokio::test]
     async fn pasted_paths_review_and_send_through_the_runtime() {
+        use std::sync::Arc;
+
+        use tokio::sync::Notify;
+
+        use crate::app::interaction::Overlay;
+
         let root =
             std::env::temp_dir().join(format!("lanweave-runtime-{:016x}", fastrand::u64(..)));
         std::fs::create_dir_all(&root).unwrap();
@@ -470,6 +543,19 @@ mod tests {
 
         let (event_sender, event_receiver) = event_channel();
         let (effect_sender, mut effect_receiver) = effect_channel();
+        let reviewed = Arc::new(Notify::new());
+        let reviewed_in_observer = Arc::clone(&reviewed);
+        let runtime = tokio::spawn(
+            AppRuntime::new(event_receiver, effect_sender).run_with_observer(move |_, ui| {
+                if let Some(Overlay::FileSelection(files)) = ui.overlay()
+                    && !files.is_reviewing()
+                    && !files.selection.is_empty()
+                {
+                    reviewed_in_observer.notify_one();
+                }
+                Ok(())
+            }),
+        );
 
         for event in [
             AppEvent::StartupCompleted,
@@ -481,18 +567,22 @@ mod tests {
             AppEvent::KeyInput(KeyInput::Enter),
             AppEvent::PairingSucceeded,
             AppEvent::User(UserAction::OpenFileSelection),
-            AppEvent::Paste(file.display().to_string()),
-            AppEvent::KeyInput(KeyInput::Enter),
-            AppEvent::KeyInput(KeyInput::Enter),
         ] {
             event_sender.send(event).await.unwrap();
         }
-        drop(event_sender);
-
-        let model = AppRuntime::new(event_receiver, effect_sender)
-            .run()
+        event_sender
+            .send(AppEvent::Paste(file.display().to_string()))
             .await
             .unwrap();
+        // The runtime inspects the paste off-thread; send only once it lands.
+        reviewed.notified().await;
+        event_sender
+            .send(AppEvent::KeyInput(KeyInput::Enter))
+            .await
+            .unwrap();
+        drop(event_sender);
+
+        let model = runtime.await.unwrap().unwrap();
 
         assert_eq!(model.state(), AppState::ShuttingDown);
         assert!(matches!(
