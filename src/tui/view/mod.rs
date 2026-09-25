@@ -180,7 +180,16 @@ mod tests {
             let output = render_to_string(&model, 80, 24);
 
             assert!(output.contains("Error"));
-            assert!(!output.contains("/home/") && !output.contains('\\'));
+
+            // The footer intentionally shows the local working directory, which
+            // contains backslashes on Windows. Only the failure panel itself
+            // must stay free of paths.
+            let (content, footer) = output.rsplit_once('\n').expect("a footer row");
+            assert!(footer.contains("Error"), "{failure:?}: {footer}");
+            assert!(
+                !content.contains("/home/") && !content.contains('\\'),
+                "{failure:?} leaked a path: {content}"
+            );
         }
     }
 
