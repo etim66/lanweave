@@ -382,19 +382,41 @@ impl PreparedFile {
 
 /// Splits pasted text into candidate paths without invoking a shell.
 ///
-/// Newlines separate entries. Each entry is trimmed, `file://` URIs are
+/// Any run of line separators (`\r`, `\n`, `\r\n` or `\0`) separates entries,
+/// because file managers send URI lists with CRLF and some terminals paste
+/// them with a lone carriage return. Each entry is trimmed, `file://` URIs are
 /// percent-decoded, and one matching pair of outer single or double quotes is
 /// removed. Inside double quotes, `\\` and `\"` are unescaped; every other
 /// backslash is kept so Windows paths and unquoted paths with spaces survive.
 pub(crate) fn parse_paths(input: &str) -> Vec<String> {
     input
-        .split('\n')
-        .filter_map(|line| {
-            let line = line.strip_suffix('\r').unwrap_or(line).trim();
-            (!line.is_empty()).then(|| normalize_entry(line))
-        })
-        .filter(|entry| !entry.is_empty())
+        .split(['\r', '\n', '\0'])
+        .flat_map(split_chunk)
         .collect()
+}
+
+/// Splits one separator-free chunk into one or more candidate paths.
+///
+/// A chunk can still hold several `file://` URIs that a file manager joined
+/// with spaces, so those are split again; ordinary paths keep their spaces.
+fn split_chunk(chunk: &str) -> Vec<String> {
+    let chunk = chunk.trim();
+    if chunk.is_empty() {
+        return Vec::new();
+    }
+    if chunk.matches("file://").count() > 1 {
+        return chunk
+            .split_whitespace()
+            .map(normalize_entry)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+    }
+    let entry = normalize_entry(chunk);
+    if entry.is_empty() {
+        Vec::new()
+    } else {
+        vec![entry]
+    }
 }
 
 /// Converts one pasted entry into a candidate path.
@@ -620,7 +642,17 @@ mod tests {
                 "file:///home/me/a%20b.txt\nfile://localhost/tmp/x\n",
                 vec!["/home/me/a b.txt", "/tmp/x"],
             ),
+            // File managers and terminals paste a lone carriage return
+            // between selected paths.
+            ("a.txt\rb.txt\r", vec!["a.txt", "b.txt"]),
+            ("a.txt\r\nb.txt\nc.txt", vec!["a.txt", "b.txt", "c.txt"]),
+            ("a.txt\0b.txt", vec!["a.txt", "b.txt"]),
+            (
+                "file:///home/me/one%20file.txt file:///home/me/two.txt",
+                vec!["/home/me/one file.txt", "/home/me/two.txt"],
+            ),
             ("  \n\n ", vec![]),
+            ("\r\n", vec![]),
             ("'unbalanced", vec!["'unbalanced"]),
         ];
 
@@ -666,6 +698,33 @@ mod tests {
         assert_eq!(request.files[0].size, 5);
         assert_eq!(request.files[3].name, "nested.zip");
         assert!(request.files[3].folder.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_multi_selection_paste_reviews_files_and_folders_together() {
+        let root = temp_root("multi-paste");
+        let first = write_file(&root, "one.txt", b"123");
+        let folder = root.join("docs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("inner.txt"), b"45").unwrap();
+        let second = write_file(&root, "two words.txt", b"6");
+
+        // Exactly the shape a desktop clipboard produces: URI entries joined
+        // by a lone carriage return, with spaces percent-encoded.
+        let uri =
+            |path: &Path| format!("file://{}", path.display().to_string().replace(' ', "%20"));
+        let input = format!("{}\r{}\r{}\r", uri(&first), uri(&folder), uri(&second));
+
+        let mut selection = FileSelection::default();
+        let issues = selection.add_text(&input);
+
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert_eq!(selection.len(), 3);
+        assert_eq!(selection.files()[0].name(), "one.txt");
+        assert_eq!(selection.files()[1].name(), "docs.zip");
+        assert!(selection.files()[1].archive().is_some());
+        assert_eq!(selection.files()[2].name(), "two words.txt");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -800,7 +859,7 @@ mod tests {
     #[test]
     fn hostile_input_is_escaped_before_display() {
         let mut selection = FileSelection::default();
-        let issues = selection.add_text("\u{1b}[31mfake\u{0}a");
+        let issues = selection.add_text("\u{1b}[31mfake\u{7}a");
 
         assert_eq!(issues.len(), 1);
         assert!(!issues[0].path().chars().any(char::is_control));
