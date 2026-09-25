@@ -499,10 +499,6 @@ pub(crate) fn apply_user_action(model: &AppModel, ui: &mut UiState, action: User
             ui.overlay = Some(Overlay::Help);
             true
         }
-        UserAction::ShowDevices => {
-            ui.overlay = None;
-            true
-        }
         UserAction::OpenDirectAddress => {
             ui.overlay = Some(Overlay::DirectAddress(DirectAddressInput::new()));
             true
@@ -751,13 +747,14 @@ mod tests {
     }
 
     #[test]
-    fn help_and_devices_only_change_ui_state() {
+    fn help_is_ui_only_while_devices_reaches_the_model() {
         let model = AppModel::for_test(AppState::Browsing);
         let mut ui = UiState::default();
         assert!(apply_user_action(&model, &mut ui, UserAction::ShowHelp));
         assert_eq!(ui.overlay(), Some(&Overlay::Help));
-        assert!(apply_user_action(&model, &mut ui, UserAction::ShowDevices));
-        assert_eq!(ui.overlay(), None);
+        // `/devices` is an application action now: the model decides whether
+        // the device list opens, so the UI must not swallow it.
+        assert!(!apply_user_action(&model, &mut ui, UserAction::ShowDevices));
         assert!(apply_user_action(
             &model,
             &mut ui,

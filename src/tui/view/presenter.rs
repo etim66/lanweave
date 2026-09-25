@@ -11,6 +11,7 @@ use super::theme::{ACCENT, ERROR, WARNING};
 pub(super) fn status_text(state: AppState) -> &'static str {
     match state {
         AppState::Starting => "Starting",
+        AppState::Home => "Ready",
         AppState::Browsing => "Browsing for devices",
         AppState::PairingOutbound
         | AppState::PairingOutboundAccepted
@@ -37,6 +38,11 @@ pub(super) fn screen_content(model: &AppModel) -> (String, String, Color) {
             "Starting Lanweave".to_owned(),
             "Preparing the terminal...".to_owned(),
             WARNING,
+        ),
+        Screen::Home => (
+            "Welcome to Lanweave".to_owned(),
+            "Send files and folders to another device on your network.\nUse /devices to see who is online.".to_owned(),
+            ACCENT,
         ),
         Screen::Browsing => {
             if model.sorted_candidates().is_empty() {

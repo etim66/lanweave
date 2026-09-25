@@ -413,6 +413,16 @@ fn render_panel_line(frame: &mut Frame<'_>, area: Rect, line: Line<'_>) {
 /// Renders the one-line keyboard hints below the state surface.
 fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let spans = match model.state() {
+        AppState::Home => vec![
+            Span::styled("/devices", Style::new().fg(TEXT)),
+            Span::styled(" devices   ", Style::new().fg(MUTED)),
+            Span::styled("/send", Style::new().fg(TEXT)),
+            Span::styled(" send files   ", Style::new().fg(MUTED)),
+            Span::styled("/help", Style::new().fg(TEXT)),
+            Span::styled(" help   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
+        ],
         AppState::Browsing => vec![
             Span::styled("up/down", Style::new().fg(TEXT)),
             Span::styled(" select   ", Style::new().fg(MUTED)),

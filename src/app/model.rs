@@ -15,6 +15,9 @@ use crate::transfer::selection::FileSelection;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Starting,
+    /// The primary screen after startup: a quiet landing card that points at
+    /// `/devices` and `/send` instead of opening the device list immediately.
+    Home,
     Browsing,
     /// A connection is being established or a `pair_request` awaits response.
     PairingOutbound,
@@ -43,8 +46,9 @@ pub enum AppState {
 impl AppState {
     /// Every state, for exhaustive test coverage.
     #[cfg(test)]
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Starting,
+        Self::Home,
         Self::Browsing,
         Self::PairingOutbound,
         Self::PairingOutboundAccepted,
@@ -109,6 +113,9 @@ impl AppState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppCapabilities {
     pub(crate) accepts_commands: bool,
+    /// `/devices` and `/connect` can start the device-selection flow.
+    pub(crate) can_open_devices: bool,
+    /// The device list is on screen and responds to up/down and enter.
     pub(crate) can_show_devices: bool,
     /// The file review list can be opened and kept on screen.
     pub(crate) can_review_files: bool,
@@ -127,6 +134,7 @@ pub(crate) struct AppCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Starting,
+    Home,
     Browsing,
     Pairing,
     Session,
@@ -140,6 +148,7 @@ impl From<AppState> for Screen {
     fn from(state: AppState) -> Self {
         match state {
             AppState::Starting => Self::Starting,
+            AppState::Home => Self::Home,
             AppState::Browsing => Self::Browsing,
             AppState::PairingOutbound
             | AppState::PairingOutboundAccepted
@@ -420,8 +429,12 @@ impl AppModel {
         let state = self.state;
         AppCapabilities {
             accepts_commands: state != AppState::ShuttingDown,
+            can_open_devices: matches!(state, AppState::Home | AppState::Browsing),
             can_show_devices: state == AppState::Browsing,
-            can_review_files: matches!(state, AppState::Browsing | AppState::SessionIdle),
+            can_review_files: matches!(
+                state,
+                AppState::Home | AppState::Browsing | AppState::SessionIdle
+            ),
             can_start_transfer: state == AppState::SessionIdle,
             can_cancel_transfer: matches!(
                 state,
@@ -625,6 +638,7 @@ mod tests {
     fn screens_are_derived_from_every_state() {
         let cases = [
             (AppState::Starting, Screen::Starting),
+            (AppState::Home, Screen::Home),
             (AppState::Browsing, Screen::Browsing),
             (AppState::PairingOutbound, Screen::Pairing),
             (AppState::PairingOutboundAccepted, Screen::Pairing),

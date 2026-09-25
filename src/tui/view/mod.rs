@@ -111,17 +111,21 @@ mod tests {
 
     #[test]
     fn basic_screens_render_at_normal_and_small_sizes() {
-        let mut browsing = AppModel::new();
-        update(&mut browsing, AppEvent::StartupCompleted);
+        let mut home = AppModel::new();
+        update(&mut home, AppEvent::StartupCompleted);
 
-        let mut error = browsing.clone();
+        let mut browsing = home.clone();
+        update(&mut browsing, AppEvent::User(UserAction::ShowDevices));
+
+        let mut error = home.clone();
         update(&mut error, AppEvent::Failed(FailureKind::Internal));
 
-        let mut shutdown = browsing.clone();
+        let mut shutdown = home.clone();
         update(&mut shutdown, AppEvent::ShutdownRequested);
 
         let cases = [
             (AppModel::new(), "Preparing the terminal"),
+            (home, "Welcome to Lanweave"),
             (browsing, "No devices found"),
             (error, "Lanweave encountered"),
             (shutdown, "Shutting down safely"),
@@ -144,7 +148,7 @@ mod tests {
         let output = render_to_string(&model, 80, 24);
         let backgrounds = render_backgrounds(&model, 80, 24);
 
-        assert!(output.contains("Browsing for devices"));
+        assert!(output.contains("Ready"));
         assert!(output.contains("v0.1.0"));
         assert!(backgrounds.contains(&BACKGROUND));
         assert!(backgrounds.contains(&SURFACE));
@@ -202,6 +206,7 @@ mod tests {
                 Instant::now(),
             ))),
         );
+        update(&mut session, AppEvent::User(UserAction::ShowDevices));
         update(
             &mut session,
             AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
@@ -285,6 +290,7 @@ mod tests {
     fn browsing_with(names: &[&str]) -> AppModel {
         let mut model = AppModel::new();
         update(&mut model, AppEvent::StartupCompleted);
+        update(&mut model, AppEvent::User(UserAction::ShowDevices));
         for name in names {
             update(
                 &mut model,
@@ -470,7 +476,7 @@ mod tests {
             output.contains(&prefix),
             "the footer must show the opened directory: {output}"
         );
-        assert!(output.contains("Browsing for devices"));
+        assert!(output.contains("Ready"));
         assert!(output.contains("v0.1.0"));
     }
 

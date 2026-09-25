@@ -279,6 +279,7 @@ mod tests {
                 "peer",
                 Instant::now(),
             ))),
+            AppEvent::User(UserAction::ShowDevices),
             AppEvent::User(UserAction::SelectDevice(DeviceId::new(1))),
             AppEvent::PairingSucceeded,
             AppEvent::User(UserAction::StartTransfer(FileSelection::default())),
@@ -411,7 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observer_sees_initial_browsing_and_shutdown_states() {
+    async fn observer_sees_the_home_screen_and_shutdown_states() {
         let (event_sender, event_receiver) = event_channel();
         let (effect_sender, _effect_receiver) = effect_channel();
         let mut observed = Vec::new();
@@ -432,11 +433,7 @@ mod tests {
 
         assert_eq!(
             observed,
-            [
-                AppState::Starting,
-                AppState::Browsing,
-                AppState::ShuttingDown
-            ]
+            [AppState::Starting, AppState::Home, AppState::ShuttingDown]
         );
     }
 
@@ -474,6 +471,10 @@ mod tests {
         let (effect_sender, mut effect_receiver) = effect_channel();
 
         event_sender.send(AppEvent::StartupCompleted).await.unwrap();
+        event_sender
+            .send(AppEvent::User(UserAction::ShowDevices))
+            .await
+            .unwrap();
         event_sender
             .send(AppEvent::Discovery(DiscoveryEvent::Resolved(
                 DiscoveredService::for_test("peer", Instant::now()),
@@ -559,6 +560,7 @@ mod tests {
 
         for event in [
             AppEvent::StartupCompleted,
+            AppEvent::User(UserAction::ShowDevices),
             AppEvent::Discovery(DiscoveryEvent::Resolved(DiscoveredService::for_test(
                 "peer",
                 Instant::now(),

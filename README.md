@@ -10,7 +10,7 @@ Lanweave is currently a work in progress. The TUI shell, live discovery, the pro
 ## How It Works
 
 1. Both users run `lanweave`. A device advertises and accepts requests only while Lanweave is running. A stale network record may remain visible briefly after an unclean exit, but connection will fail and the record will expire.
-2. User 1 opens the device list, selects User 2's device, and requests pairing.
+2. User 1 opens the device list with `/devices`, selects User 2's device, and requests pairing.
 3. User 2 sees the request and accepts or rejects it.
 4. If User 2 accepts, their Lanweave app creates and displays a one-time eight-digit code. User 2 shows that code to User 1.
 5. User 1 enters the code. Lanweave checks the code and creates an authenticated, encrypted session between the two devices.
@@ -27,7 +27,8 @@ Closing the session removes its temporary authorization. The users must repeat t
 
 The app is interactive rather than a set of one-shot shell commands.
 
-- Run `lanweave` to open the TUI.
+- Run `lanweave` to open the TUI. It starts on a quiet home screen that points
+  at the available commands instead of opening the device list immediately.
 - Press `q` outside the command palette, or Ctrl+C anywhere, to close Lanweave.
 - Enter `/` to open the command palette. Type to filter, use Up/Down to select,
   Enter to run a command, Backspace to edit, and Escape to close it.

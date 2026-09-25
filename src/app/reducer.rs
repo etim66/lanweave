@@ -44,7 +44,14 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
     }
 
     let effect = match (model.state(), action) {
-        (_, UserAction::ShowHelp | UserAction::ShowDevices) => None,
+        (AppState::Home, UserAction::ShowDevices) => {
+            model.transition_to(AppState::Browsing);
+            None
+        }
+        (_, UserAction::ShowHelp) => None,
+        // The device list is already on screen; the action only closes any
+        // overlay that was open above it.
+        (AppState::Browsing, UserAction::ShowDevices) => None,
         (AppState::Browsing, UserAction::SelectDevice(device)) => {
             // The device is resolved against the live store, so a removed
             // device can never start a connection through stale UI state.
@@ -100,7 +107,7 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
                 .is_some_and(|summary| summary.session_closed);
             model.clear_summary();
             model.transition_to(if session_closed {
-                AppState::Browsing
+                AppState::Home
             } else {
                 AppState::SessionIdle
             });
@@ -127,10 +134,10 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
 fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
     let effect = match (model.state(), event) {
         (AppState::Starting, AppEvent::StartupCompleted) => {
-            model.transition_to(AppState::Browsing);
+            model.transition_to(AppState::Home);
             None
         }
-        (AppState::Browsing, AppEvent::IncomingPairingRequest(peer)) => {
+        (AppState::Home | AppState::Browsing, AppEvent::IncomingPairingRequest(peer)) => {
             model.set_pairing_peer(peer);
             model.transition_to(AppState::PairingInbound);
             None
@@ -157,7 +164,7 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
         }
         (state, AppEvent::PairingEnded) if state.is_pairing() => {
             model.clear_pairing();
-            model.transition_to(AppState::Browsing);
+            model.transition_to(AppState::Home);
             None
         }
         (AppState::SessionIdle, AppEvent::IncomingTransferRequest(proposal)) => {
@@ -243,7 +250,7 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             if model.summary().is_some() {
                 model.mark_summary_session_closed();
             } else {
-                model.transition_to(AppState::Browsing);
+                model.transition_to(AppState::Home);
             }
             None
         }
@@ -251,7 +258,7 @@ fn apply_service_event(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             model.clear_pairing();
             model.clear_session_peer();
             model.clear_transfer();
-            model.transition_to(AppState::Browsing);
+            model.transition_to(AppState::Home);
             None
         }
         (state, AppEvent::Failed(kind)) if !matches!(state, AppState::Error(_)) => {
@@ -350,6 +357,12 @@ mod tests {
             (
                 AppState::Starting,
                 AppEvent::StartupCompleted,
+                AppState::Home,
+                None,
+            ),
+            (
+                AppState::Home,
+                AppEvent::User(UserAction::ShowDevices),
                 AppState::Browsing,
                 None,
             ),
@@ -398,7 +411,7 @@ mod tests {
             (
                 AppState::PairingOutbound,
                 AppEvent::PairingEnded,
-                AppState::Browsing,
+                AppState::Home,
                 None,
             ),
             (
@@ -494,7 +507,7 @@ mod tests {
             (
                 AppState::ClosingSession,
                 AppEvent::SessionClosed,
-                AppState::Browsing,
+                AppState::Home,
                 None,
             ),
             (
@@ -671,7 +684,7 @@ mod tests {
             "0000 0042".to_owned()
         );
         update(&mut model, AppEvent::SessionClosed);
-        assert_eq!(model.state(), AppState::Browsing);
+        assert_eq!(model.state(), AppState::Home);
         assert!(model.pairing_code().is_none());
 
         // A failure clears pairing state before showing the error screen.
@@ -821,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn session_close_returns_every_connected_state_to_browsing() {
+    fn session_close_returns_every_connected_state_to_home() {
         for state in all_states() {
             if !state.is_pairing() && !state.has_session() {
                 continue;
@@ -834,7 +847,7 @@ mod tests {
             let mut model = model_in(state);
 
             assert!(update(&mut model, AppEvent::SessionClosed).is_empty());
-            assert_eq!(model.state(), AppState::Browsing, "state: {state:?}");
+            assert_eq!(model.state(), AppState::Home, "state: {state:?}");
         }
     }
 
@@ -877,7 +890,7 @@ mod tests {
         assert!(model.summary().unwrap().session_closed);
 
         update(&mut model, AppEvent::User(UserAction::DismissSummary));
-        assert_eq!(model.state(), AppState::Browsing);
+        assert_eq!(model.state(), AppState::Home);
         assert!(model.summary().is_none());
     }
 

@@ -4,9 +4,10 @@
 
 | State | Event | Next state |
 | --- | --- | --- |
-| `starting` | Terminal, listener, discovery, and event loop start | `browsing` |
+| `starting` | Terminal, listener, discovery, and event loop start | `home` |
+| `home` | User opens `/devices` | `browsing` |
+| `home` or `browsing` | Incoming pairing request | `pairing_inbound` |
 | `browsing` | User selects a visible device | `pairing_outbound` |
-| `browsing` | Incoming pairing request | `pairing_inbound` |
 | Any pairing or session state | Another incoming pairing request; reject as `busy` | Same state |
 | `pairing_outbound` | Request accepted and code succeeds | `session_idle` |
 | `pairing_inbound` | User accepts and pairing succeeds | `session_idle` |
@@ -15,8 +16,8 @@
 | `session_idle` | Peer proposes files | `inbound_proposal` |
 | Transfer finished, or cancelled after `ready` | Both sides show a summary | `transfer_complete` |
 | Transfer cancelled before `ready` | The cancelling side shows a summary; the peer returns to idle | `transfer_complete` |
-| `transfer_complete` | User dismisses the summary | `session_idle` (or `browsing` if the session closed) |
-| Any session state | Session closes or connection fails | `browsing` |
+| `transfer_complete` | User dismisses the summary | `session_idle` (or `home` if the session closed) |
+| Any pairing or session state | Session closes or connection fails | `home` |
 | Any state | User quits or process shutdown begins | `shutting_down` |
 
 Entering `/` opens the command list without changing the network state. Commands that are unsafe in the current state are hidden or disabled.

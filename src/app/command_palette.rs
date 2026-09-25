@@ -179,9 +179,9 @@ fn always_available(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
-/// Availability for the devices command, which needs the browsing screen.
+/// Availability for the devices command, which opens the device list.
 fn devices_availability(capabilities: AppCapabilities) -> CommandAvailability {
-    if capabilities.can_show_devices {
+    if capabilities.can_open_devices {
         CommandAvailability::Enabled
     } else {
         CommandAvailability::Hidden
@@ -274,7 +274,7 @@ mod tests {
             );
             assert_eq!(
                 availability(CommandId::Devices),
-                if state == AppState::Browsing {
+                if matches!(state, AppState::Home | AppState::Browsing) {
                     CommandAvailability::Enabled
                 } else {
                     CommandAvailability::Hidden
@@ -282,7 +282,7 @@ mod tests {
             );
             assert_eq!(
                 availability(CommandId::Connect),
-                if state == AppState::Browsing {
+                if matches!(state, AppState::Home | AppState::Browsing) {
                     CommandAvailability::Enabled
                 } else {
                     CommandAvailability::Hidden
@@ -292,7 +292,9 @@ mod tests {
             assert_eq!(
                 availability(CommandId::Send),
                 match state {
-                    AppState::Browsing | AppState::SessionIdle => CommandAvailability::Enabled,
+                    AppState::Home | AppState::Browsing | AppState::SessionIdle => {
+                        CommandAvailability::Enabled
+                    }
                     AppState::ClosingSession => {
                         CommandAvailability::Disabled("The session is closing")
                     }
