@@ -489,6 +489,8 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled(" select   ", Style::new().fg(MUTED)),
             Span::styled("enter", Style::new().fg(TEXT)),
             Span::styled(" connect   ", Style::new().fg(MUTED)),
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" home   ", Style::new().fg(MUTED)),
             Span::styled("/", Style::new().fg(TEXT)),
             Span::styled(" commands   ", Style::new().fg(MUTED)),
             Span::styled("q", Style::new().fg(TEXT)),

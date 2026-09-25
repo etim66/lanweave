@@ -11,6 +11,7 @@ pub(crate) const MAX_COMMAND_QUERY_CHARS: usize = 64;
 pub(crate) enum CommandId {
     Help,
     Devices,
+    Home,
     Connect,
     Send,
     Cancel,
@@ -37,7 +38,7 @@ pub(crate) struct CommandSpec {
 }
 
 /// The complete slash command table, in display order.
-const COMMANDS: [CommandSpec; 7] = [
+const COMMANDS: [CommandSpec; 8] = [
     CommandSpec {
         id: CommandId::Help,
         name: "/help",
@@ -51,6 +52,13 @@ const COMMANDS: [CommandSpec; 7] = [
         description: "Show devices currently running Lanweave",
         availability: devices_availability,
         action: UserAction::ShowDevices,
+    },
+    CommandSpec {
+        id: CommandId::Home,
+        name: "/home",
+        description: "Return to the home screen",
+        availability: home_availability,
+        action: UserAction::GoHome,
     },
     CommandSpec {
         id: CommandId::Connect,
@@ -188,6 +196,15 @@ fn devices_availability(capabilities: AppCapabilities) -> CommandAvailability {
     }
 }
 
+/// Availability for the home command, which leaves the device list.
+fn home_availability(capabilities: AppCapabilities) -> CommandAvailability {
+    if capabilities.can_show_home {
+        CommandAvailability::Enabled
+    } else {
+        CommandAvailability::Hidden
+    }
+}
+
 /// Availability for the send command.
 ///
 /// The review list opens wherever files may be prepared; sending itself is
@@ -243,16 +260,17 @@ mod tests {
             .map(|command| command.name)
             .collect::<HashSet<_>>();
 
-        assert_eq!(commands.len(), 7);
+        assert_eq!(commands.len(), 8);
         assert_eq!(names.len(), commands.len());
         assert!(commands.iter().all(|command| command.name.starts_with('/')));
         assert_eq!(commands[0].action, UserAction::ShowHelp);
         assert_eq!(commands[1].action, UserAction::ShowDevices);
-        assert_eq!(commands[2].action, UserAction::OpenDirectAddress);
-        assert_eq!(commands[3].action, UserAction::OpenFileSelection);
-        assert_eq!(commands[4].action, UserAction::CancelTransfer);
-        assert_eq!(commands[5].action, UserAction::Disconnect);
-        assert_eq!(commands[6].action, UserAction::Quit);
+        assert_eq!(commands[2].action, UserAction::GoHome);
+        assert_eq!(commands[3].action, UserAction::OpenDirectAddress);
+        assert_eq!(commands[4].action, UserAction::OpenFileSelection);
+        assert_eq!(commands[5].action, UserAction::CancelTransfer);
+        assert_eq!(commands[6].action, UserAction::Disconnect);
+        assert_eq!(commands[7].action, UserAction::Quit);
     }
 
     #[test]
@@ -279,6 +297,15 @@ mod tests {
                 } else {
                     CommandAvailability::Hidden
                 }
+            );
+            assert_eq!(
+                availability(CommandId::Home),
+                if state == AppState::Browsing {
+                    CommandAvailability::Enabled
+                } else {
+                    CommandAvailability::Hidden
+                },
+                "state: {state:?}"
             );
             assert_eq!(
                 availability(CommandId::Connect),
@@ -362,6 +389,11 @@ mod tests {
             Some(UserAction::OpenDirectAddress)
         );
         assert_eq!(resolve(session, "connect", Some(CommandId::Connect)), None);
+        assert_eq!(
+            resolve(browsing, "home", Some(CommandId::Home)),
+            Some(UserAction::GoHome)
+        );
+        assert_eq!(resolve(session, "home", Some(CommandId::Home)), None);
 
         assert_eq!(
             move_selection(browsing, "", Some(CommandId::Quit), true),

@@ -38,6 +38,7 @@ The app is interactive rather than a set of one-shot shell commands.
   their network host name. Names are untrusted until pairing confirms the live
   connection.
 - In the device list, use Up/Down to select a device and Enter to connect.
+  Escape (or `/home`) returns to the home screen.
 - Use `/connect` to enter a `host:port` directly when discovery is unavailable.
   The input validates the address before a connection can start.
 - A request that needs your decision appears as a highlighted dialog with

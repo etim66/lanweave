@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `starting` | Terminal, listener, discovery, and event loop start | `home` |
 | `home` | User opens `/devices` | `browsing` |
+| `browsing` | User returns home (`/home` or Escape) | `home` |
 | `home` or `browsing` | Incoming pairing request | `pairing_inbound` |
 | `browsing` | User selects a visible device | `pairing_outbound` |
 | Any pairing or session state | Another incoming pairing request; reject as `busy` | Same state |

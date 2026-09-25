@@ -183,6 +183,8 @@ impl PairingPeer {
 pub(crate) enum UserAction {
     ShowHelp,
     ShowDevices,
+    /// Leaves the device list and returns to the home screen.
+    GoHome,
     SelectDevice(DeviceId),
     ConnectDirect(DirectEndpoint),
     OpenDirectAddress,

@@ -52,6 +52,10 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
         // The device list is already on screen; the action only closes any
         // overlay that was open above it.
         (AppState::Browsing, UserAction::ShowDevices) => None,
+        (AppState::Browsing, UserAction::GoHome) => {
+            model.transition_to(AppState::Home);
+            None
+        }
         (AppState::Browsing, UserAction::SelectDevice(device)) => {
             // The device is resolved against the live store, so a removed
             // device can never start a connection through stale UI state.
@@ -379,6 +383,12 @@ mod tests {
             ),
             (
                 AppState::Browsing,
+                AppEvent::User(UserAction::GoHome),
+                AppState::Home,
+                None,
+            ),
+            (
+                AppState::Browsing,
                 AppEvent::IncomingPairingRequest(peer()),
                 AppState::PairingInbound,
                 None,
@@ -564,6 +574,31 @@ mod tests {
 
             assert_eq!(model.state(), state, "state: {state:?}");
             assert!(effects.is_empty(), "state: {state:?}");
+        }
+    }
+
+    #[test]
+    fn going_home_only_leaves_the_device_list() {
+        let mut model = model_in(AppState::Browsing);
+        assert!(update(&mut model, AppEvent::User(UserAction::GoHome)).is_empty());
+        assert_eq!(model.state(), AppState::Home);
+
+        // The action is inert on the home screen itself.
+        assert!(update(&mut model, AppEvent::User(UserAction::GoHome)).is_empty());
+        assert_eq!(model.state(), AppState::Home);
+
+        // And inert in every other state.
+        for state in all_states() {
+            if state == AppState::Browsing {
+                continue;
+            }
+
+            let mut other = model_in(state);
+            assert!(
+                update(&mut other, AppEvent::User(UserAction::GoHome)).is_empty(),
+                "state: {state:?}"
+            );
+            assert_eq!(other.state(), state, "state: {state:?}");
         }
     }
 

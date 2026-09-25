@@ -469,6 +469,8 @@ pub(crate) fn apply_key_input(
             KeyInput::Escape if model.state() == AppState::PairingInbound => {
                 Some(UserAction::RejectPairing)
             }
+            // Escape leaves the device list for the home screen.
+            KeyInput::Escape if model.capabilities().can_show_home => Some(UserAction::GoHome),
             KeyInput::Up | KeyInput::Down if model.capabilities().can_show_devices => {
                 move_device_selection(model, ui, input == KeyInput::Down);
                 None
@@ -582,6 +584,11 @@ pub(crate) fn apply_user_action(model: &AppModel, ui: &mut UiState, action: User
                 ..FileSelectionInput::default()
             }));
             true
+        }
+        UserAction::GoHome => {
+            // The list highlight is not carried over to the next visit.
+            ui.device_selection = None;
+            false
         }
         _ => false,
     }
@@ -1057,6 +1064,41 @@ mod tests {
             apply_key_input(&empty, &mut empty_ui, KeyInput::Enter),
             None
         );
+    }
+
+    #[test]
+    fn escape_returns_home_from_the_device_list() {
+        let model = browsing_with(&["alpha"]);
+        let mut ui = UiState::default();
+        apply_key_input(&model, &mut ui, KeyInput::Down);
+        assert!(ui.device_selection().is_some());
+
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Escape),
+            Some(UserAction::GoHome)
+        );
+        // The UI clears the highlight before the reducer changes state.
+        assert!(!apply_user_action(&model, &mut ui, UserAction::GoHome));
+        assert_eq!(ui.device_selection(), None);
+
+        // An open overlay still consumes Escape first.
+        let mut palette_ui = UiState::default();
+        apply_key_input(&model, &mut palette_ui, KeyInput::Character('/'));
+        assert_eq!(
+            apply_key_input(&model, &mut palette_ui, KeyInput::Escape),
+            None
+        );
+        assert_eq!(palette_ui.overlay(), None);
+
+        // Other screens never dispatch the home action from Escape alone.
+        for state in [AppState::Home, AppState::SessionIdle] {
+            let mut other_ui = UiState::default();
+            assert_eq!(
+                apply_key_input(&AppModel::for_test(state), &mut other_ui, KeyInput::Escape),
+                None,
+                "state: {state:?}"
+            );
+        }
     }
 
     #[test]

@@ -117,6 +117,8 @@ pub(crate) struct AppCapabilities {
     pub(crate) can_open_devices: bool,
     /// The device list is on screen and responds to up/down and enter.
     pub(crate) can_show_devices: bool,
+    /// `/home` and Escape can return to the home screen.
+    pub(crate) can_show_home: bool,
     /// The file review list can be opened and kept on screen.
     pub(crate) can_review_files: bool,
     pub(crate) can_start_transfer: bool,
@@ -431,6 +433,7 @@ impl AppModel {
             accepts_commands: state != AppState::ShuttingDown,
             can_open_devices: matches!(state, AppState::Home | AppState::Browsing),
             can_show_devices: state == AppState::Browsing,
+            can_show_home: state == AppState::Browsing,
             can_review_files: matches!(
                 state,
                 AppState::Home | AppState::Browsing | AppState::SessionIdle

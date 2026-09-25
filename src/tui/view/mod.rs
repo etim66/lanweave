@@ -383,6 +383,7 @@ mod tests {
         assert!(output.contains("No devices found"));
         assert!(output.contains("Searching the local network"));
         assert!(output.contains("up/down"));
+        assert!(output.contains("esc home"));
     }
 
     #[test]
