@@ -22,6 +22,11 @@
 
 Entering `/` opens the command list without changing the network state. Commands that are unsafe in the current state are hidden or disabled.
 
+Screens that wait for the local user (pairing request, transfer review, exclusive
+code sharing, waiting for a response or approval, transfer summary) show at least
+one highlighted button. Left/Right moves between Accept and Reject, Enter chooses
+the focused button, and Escape remains a shortcut for reject or cancel.
+
 ## Pairing Initiator
 
 | State | Event and action | Next state |

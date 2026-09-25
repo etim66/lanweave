@@ -128,6 +128,12 @@ fn map_key(key: KeyEvent) -> Option<AppEvent> {
         KeyCode::Down if has_no_command_modifier(key.modifiers) => {
             Some(AppEvent::KeyInput(KeyInput::Down))
         }
+        KeyCode::Left if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Left))
+        }
+        KeyCode::Right if has_no_command_modifier(key.modifiers) => {
+            Some(AppEvent::KeyInput(KeyInput::Right))
+        }
         _ => None,
     }
 }
@@ -190,6 +196,8 @@ mod tests {
             (KeyCode::Esc, KeyInput::Escape),
             (KeyCode::Up, KeyInput::Up),
             (KeyCode::Down, KeyInput::Down),
+            (KeyCode::Left, KeyInput::Left),
+            (KeyCode::Right, KeyInput::Right),
         ];
 
         for (code, input) in cases {

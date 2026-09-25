@@ -4,10 +4,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::app::interaction::TransferReviewInput;
+use crate::app::interaction::{DialogFocus, TransferReviewInput};
 use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
+use super::dialog::{self, Button};
 use super::layout::{centered_rect, inset_surface, surface_width};
 use super::presenter::format_size;
 use super::render_focus_rail;
@@ -58,8 +59,10 @@ pub(super) fn render(
         );
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled("left/right", Style::new().fg(TEXT)),
+                Span::styled(" choose   ", Style::new().fg(MUTED)),
                 Span::styled("enter", Style::new().fg(TEXT)),
-                Span::styled(" accept   ", Style::new().fg(MUTED)),
+                Span::styled(" select   ", Style::new().fg(MUTED)),
                 Span::styled("esc", Style::new().fg(TEXT)),
                 Span::styled(" reject", Style::new().fg(MUTED)),
             ])),
@@ -68,14 +71,24 @@ pub(super) fn render(
     }
 }
 
-/// Renders the title, peer, manifest, destination, and any error.
+/// Renders the title, peer, manifest, destination, error, and decision buttons.
 fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &TransferReviewInput) {
     let mut y = inner.y;
-
-    // Reserve the destination row and, when present, the error row above it.
-    let footer = 1 + u16::from(input.error.is_some());
-    let list_end = (inner.y + inner.height).saturating_sub(footer);
-    let destination_y = inner.y + inner.height - 1;
+    let bottom = inner.y + inner.height;
+    let buttons_y = bottom.saturating_sub(1);
+    // An error replaces the destination line when the card is short, but keeps
+    // its own row above the destination when there is room.
+    let error_rows = u16::from(input.error.is_some());
+    let (error_y, destination_y) = match (error_rows, inner.height) {
+        (1, height) if height >= 4 => (Some(bottom - 2), Some(bottom - 3)),
+        (1, _) => (Some(bottom.saturating_sub(2)), None),
+        (_, height) if height >= 2 => (None, Some(bottom - 2)),
+        _ => (None, None),
+    };
+    let list_end = error_y
+        .or(destination_y)
+        .unwrap_or(buttons_y)
+        .min(buttons_y);
 
     let title = match model.transfer_proposal() {
         Some(proposal) => format!(
@@ -148,24 +161,36 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
         }
     }
 
-    if let Some(error) = input.error {
+    if let (Some(error), Some(error_y)) = (input.error, error_y) {
         render_panel_line(
             frame,
-            Rect::new(inner.x, list_end, inner.width, 1),
+            Rect::new(inner.x, error_y, inner.width, 1),
             Line::styled(error, Style::new().fg(ERROR)),
         );
     }
 
-    render_panel_line(
+    if let Some(destination_y) = destination_y {
+        render_panel_line(
+            frame,
+            Rect::new(inner.x, destination_y, inner.width, 1),
+            Line::from(vec![
+                Span::styled(
+                    "Save to: ",
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(escape_display(&input.destination), Style::new().fg(TEXT)),
+            ]),
+        );
+    }
+
+    let buttons = [
+        Button::new("Accept", input.focus == DialogFocus::Accept),
+        Button::new("Reject", input.focus == DialogFocus::Reject),
+    ];
+    dialog::render_buttons(
         frame,
-        Rect::new(inner.x, destination_y, inner.width, 1),
-        Line::from(vec![
-            Span::styled(
-                "Save to: ",
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(escape_display(&input.destination), Style::new().fg(TEXT)),
-        ]),
+        Rect::new(inner.x, buttons_y, inner.width, 1),
+        &buttons,
     );
 }
 

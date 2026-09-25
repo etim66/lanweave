@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use crate::app::interaction::UiState;
 use crate::app::model::{AppModel, AppState, Screen};
 
+use super::dialog::{self, Button};
 use super::digits;
 use super::layout::{centered_rect, inset_surface, surface_width};
 use super::presenter::screen_content;
@@ -191,8 +192,9 @@ fn render_state_surface(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui:
 
 /// Renders the responder's one-time code in the large digit font.
 ///
-/// The code already exists only after local acceptance and never leaves this
-/// device; it is shown large because the other user reads it aloud or types it.
+/// The code exists only after local acceptance and never leaves this device;
+/// it is shown large so the receiver can share it with the sender. The cancel
+/// button ends the provisional connection.
 fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let inner = inset_surface(area, u16::from(area.height >= 4));
     if inner.width == 0 || inner.height == 0 {
@@ -203,7 +205,7 @@ fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel
         frame,
         Rect::new(inner.x, inner.y, inner.width, 1),
         Line::styled(
-            "Pairing code",
+            "Share this code",
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
     );
@@ -213,48 +215,59 @@ fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel
     };
     let digits: Vec<char> = code.grouped().chars().collect();
     let glyph_width = u16::try_from(digits::width(digits.len())).unwrap_or(u16::MAX);
+    let first_row = inner.y.saturating_add(2);
     if glyph_width > inner.width {
         render_panel_line(
             frame,
-            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            Rect::new(inner.x, first_row, inner.width, 1),
             Line::styled(
                 code.grouped(),
                 Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
         );
-        return;
-    }
-
-    let first_row = inner.y.saturating_add(2);
-    for row_index in 0..digits::ROWS {
-        let row_y = first_row.saturating_add(u16::try_from(row_index).unwrap_or(u16::MAX));
-        if row_y >= inner.y + inner.height {
-            break;
+    } else {
+        for row_index in 0..digits::ROWS {
+            let row_y = first_row.saturating_add(u16::try_from(row_index).unwrap_or(u16::MAX));
+            if row_y >= inner.y + inner.height {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    digits::row(&digits, row_index),
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Center)
+                .style(Style::new().bg(SURFACE)),
+                Rect::new(inner.x, row_y, inner.width, 1),
+            );
         }
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                digits::row(&digits, row_index),
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Center)
-            .style(Style::new().bg(SURFACE)),
-            Rect::new(inner.x, row_y, inner.width, 1),
-        );
     }
 
-    if inner.height >= 6 {
+    // The bottom rows carry the sharing note and the cancel button.
+    let button_y = inner.y + inner.height - 1;
+    if inner.height >= 10 {
         render_panel_line(
             frame,
-            Rect::new(inner.x, inner.y + inner.height - 2, inner.width, 1),
-            Line::styled("Type this code on the other device.", Style::new().fg(TEXT)),
+            Rect::new(inner.x, button_y - 2, inner.width, 1),
+            Line::styled(
+                "Give this code to the sender to authorize the session.",
+                Style::new().fg(TEXT),
+            ),
         );
         render_panel_line(
             frame,
-            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            Rect::new(inner.x, button_y - 1, inner.width, 1),
             Line::styled(
                 "It expires after about two minutes and is never sent over the connection.",
                 Style::new().fg(MUTED),
             ),
+        );
+    }
+    if inner.height >= 8 {
+        dialog::render_buttons(
+            frame,
+            Rect::new(inner.x, button_y, inner.width, 1),
+            &[Button::new("Cancel pairing", true)],
         );
     }
 }
@@ -262,11 +275,23 @@ fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel
 /// Renders the title and message for a non-browsing screen.
 ///
 /// The message may contain newlines; each line is rendered separately so a
-/// multi-sentence prompt never runs together on one row.
+/// multi-sentence prompt never runs together on one row. Waiting screens with
+/// one available action show it as a highlighted button.
 fn render_message_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let (title, message, color) = screen_content(model);
     let top_padding = u16::from(area.height >= 4);
     let inner = inset_surface(area, top_padding);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let action = action_label(model.state());
+    let button_rows = if action.is_some() && inner.height >= 4 {
+        2
+    } else {
+        0
+    };
+    let body_height = inner.height.saturating_sub(button_rows);
     let mut lines = vec![Line::styled(
         title,
         Style::new().fg(color).add_modifier(Modifier::BOLD),
@@ -280,8 +305,26 @@ fn render_message_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         Paragraph::new(lines)
             .style(Style::new().bg(SURFACE))
             .wrap(Wrap { trim: true }),
-        inner,
+        Rect::new(inner.x, inner.y, inner.width, body_height),
     );
+
+    if let (Some(label), true) = (action, button_rows > 0) {
+        dialog::render_buttons(
+            frame,
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            &[Button::new(label, true)],
+        );
+    }
+}
+
+/// Returns the single action a waiting screen offers, if any.
+fn action_label(state: AppState) -> Option<&'static str> {
+    match state {
+        AppState::PairingOutbound => Some("Cancel request"),
+        AppState::PairingConfirming => Some("Cancel pairing"),
+        AppState::OutboundProposal => Some("Cancel transfer"),
+        _ => None,
+    }
 }
 
 /// Renders the live device list: title, rows, and the untrusted note.
@@ -434,10 +477,26 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled(" quit", Style::new().fg(MUTED)),
         ],
         AppState::PairingInbound => vec![
+            Span::styled("left/right", Style::new().fg(TEXT)),
+            Span::styled(" choose   ", Style::new().fg(MUTED)),
             Span::styled("enter", Style::new().fg(TEXT)),
-            Span::styled(" accept   ", Style::new().fg(MUTED)),
+            Span::styled(" select   ", Style::new().fg(MUTED)),
             Span::styled("esc", Style::new().fg(TEXT)),
             Span::styled(" reject   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
+        ],
+        AppState::PairingOutbound => vec![
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" cancel request   ", Style::new().fg(MUTED)),
+            Span::styled("/", Style::new().fg(TEXT)),
+            Span::styled(" commands   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
+        ],
+        AppState::PairingInboundAccepted => vec![
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" cancel pairing   ", Style::new().fg(MUTED)),
             Span::styled("/", Style::new().fg(TEXT)),
             Span::styled(" commands   ", Style::new().fg(MUTED)),
             Span::styled("q", Style::new().fg(TEXT)),
@@ -451,6 +510,12 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled("esc", Style::new().fg(TEXT)),
             Span::styled(" cancel", Style::new().fg(MUTED)),
         ],
+        AppState::PairingConfirming => vec![
+            Span::styled("esc", Style::new().fg(TEXT)),
+            Span::styled(" cancel pairing   ", Style::new().fg(MUTED)),
+            Span::styled("q", Style::new().fg(TEXT)),
+            Span::styled(" quit", Style::new().fg(MUTED)),
+        ],
         AppState::TransferComplete => vec![
             Span::styled("enter", Style::new().fg(TEXT)),
             Span::styled(" dismiss   ", Style::new().fg(MUTED)),
@@ -463,7 +528,7 @@ fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         | AppState::TransferringOutbound
         | AppState::TransferringInbound => vec![
             Span::styled("esc", Style::new().fg(TEXT)),
-            Span::styled(" cancel   ", Style::new().fg(MUTED)),
+            Span::styled(" cancel transfer   ", Style::new().fg(MUTED)),
             Span::styled("/", Style::new().fg(TEXT)),
             Span::styled(" commands   ", Style::new().fg(MUTED)),
             Span::styled("q", Style::new().fg(TEXT)),

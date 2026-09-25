@@ -1,4 +1,5 @@
 mod chrome;
+mod dialog;
 mod digits;
 mod direct_address;
 mod file_selection;
@@ -6,6 +7,7 @@ mod help;
 mod home;
 mod layout;
 mod pairing_code;
+mod pairing_prompt;
 mod palette;
 mod presenter;
 mod theme;
@@ -53,6 +55,9 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         Some(Overlay::DirectAddress(input)) => {
             direct_address::render(frame, content, model, input);
         }
+        Some(Overlay::PairingPrompt(prompt)) => {
+            pairing_prompt::render(frame, content, model, prompt);
+        }
         Some(Overlay::PairingCode(input)) => {
             pairing_code::render(frame, content, model, input);
         }
@@ -99,7 +104,7 @@ mod tests {
     use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
     use crate::app::interaction::{
-        FileSelectionInput, Overlay, TransferReviewInput, UiState, apply_key_input,
+        DialogFocus, FileSelectionInput, Overlay, TransferReviewInput, UiState, apply_key_input,
         apply_user_action, reconcile,
     };
     use crate::app::model::{AppModel, AppState, TransferProgress, TransferProposal};
@@ -251,7 +256,16 @@ mod tests {
         assert!(output.contains("Pairing request"));
         assert!(output.contains("untrusted"));
         assert!(output.contains("peer\\u{000A}name"));
-        assert!(output.contains("192.0.2.10:4242"));
+        assert!(!output.contains("192.0.2.10:4242"), "the address is noise");
+
+        // The decision is a dialog with focused Accept and Reject buttons.
+        let mut ui = UiState::default();
+        reconcile(&prompt, &mut ui);
+        let output = render_with_ui(&prompt, &ui, 80, 24);
+        assert!(output.contains("Accept"));
+        assert!(output.contains("Reject"));
+        assert!(output.contains("left/right"));
+        assert!(!render_with_ui(&prompt, &ui, 20, 4).is_empty());
 
         // The responder displays the code grouped in the large digit font.
         let mut display = prompt.clone();
@@ -261,8 +275,9 @@ mod tests {
             AppEvent::PairingCodeIssued(PairingCode::parse("01234567").unwrap()),
         );
         let output = render_to_string(&display, 80, 24);
-        assert!(output.contains("Pairing code"));
-        assert!(output.contains("Type this code on the other device."));
+        assert!(output.contains("Share this code"));
+        assert!(output.contains("Give this code to the sender to authorize the session."));
+        assert!(!output.contains("Type this code on the other device."));
         assert!(output.contains('█'));
 
         // The initiator's code entry opens with the accepted response.
@@ -444,15 +459,60 @@ mod tests {
         let tiny = render_with_ui(&model, &ui, 30, 4);
         assert!(tiny.contains("3 incoming file(s)"));
 
-        // At six rows the error keeps its reserved row above the destination.
+        // A short card shows the error rather than hiding it below the fold,
+        // and a taller one keeps both the error and the destination.
         let mut error_ui = UiState::for_test(Overlay::TransferReview(TransferReviewInput {
             destination: "/tmp".to_owned(),
             error: Some("Enter an existing directory"),
+            focus: DialogFocus::Accept,
         }));
         reconcile(&model, &mut error_ui);
         let small = render_with_ui(&model, &error_ui, 80, 6);
         assert!(small.contains("Enter an existing directory"));
-        assert!(small.contains("Save to:"));
+        assert!(small.contains("Accept"));
+        assert!(small.contains("Reject"));
+        let tall = render_with_ui(&model, &error_ui, 80, 10);
+        assert!(tall.contains("Enter an existing directory"));
+        assert!(tall.contains("Save to:"));
+    }
+
+    #[test]
+    fn the_pairing_prompt_buttons_follow_arrow_keys() {
+        let mut model = AppModel::new();
+        update(&mut model, AppEvent::StartupCompleted);
+        update(
+            &mut model,
+            AppEvent::IncomingPairingRequest(PairingPeer::new(
+                Some("peer".to_owned()),
+                "192.0.2.10:4242".to_owned(),
+            )),
+        );
+        let mut ui = UiState::default();
+        reconcile(&model, &mut ui);
+
+        // Accept is focused first, so Enter accepts without any navigation.
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::AcceptPairing)
+        );
+
+        // Right moves the focus to Reject, where Enter rejects.
+        reconcile(&model, &mut ui);
+        apply_key_input(&model, &mut ui, KeyInput::Right);
+        let output = render_with_ui(&model, &ui, 80, 24);
+        assert!(output.contains("Accept"));
+        assert!(output.contains("Reject"));
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::RejectPairing)
+        );
+
+        // Escape stays a shortcut for reject.
+        reconcile(&model, &mut ui);
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Escape),
+            Some(UserAction::RejectPairing)
+        );
     }
 
     #[test]

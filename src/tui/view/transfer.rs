@@ -8,6 +8,7 @@ use crate::app::model::{AppModel, AppState, TransferDirection, TransferProgress}
 use crate::discovery::escape_display;
 
 use super::chrome::shorten_home;
+use super::dialog::{self, Button};
 use super::layout::inset_surface;
 use super::presenter::format_size;
 use super::theme::{ACCENT, MUTED, PROGRESS_TRACK, SUCCESS, SURFACE, TEXT, WARNING};
@@ -74,13 +75,23 @@ pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) 
     }
 
     y += 1;
-    let capacity = (inner.y + inner.height).saturating_sub(y);
+    let button_rows = u16::from(inner.height >= 6);
+    let capacity = (inner.y + inner.height)
+        .saturating_sub(y)
+        .saturating_sub(button_rows);
     render_file_rows(
         frame,
         Rect::new(inner.x, y, inner.width, capacity),
         &files,
         model.transfer_progress(),
     );
+    if button_rows > 0 {
+        dialog::render_buttons(
+            frame,
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            &[Button::new("Cancel transfer", true)],
+        );
+    }
 }
 
 /// Renders the finished-transfer summary for both participants.
@@ -135,8 +146,8 @@ pub(super) fn render_summary_panel(frame: &mut Frame<'_>, area: Rect, model: &Ap
         Line::styled(detail, Style::new().fg(MUTED)),
     );
 
-    // Reserve the destination and session-note rows at the bottom.
-    let reserved = u16::from(summary.destination.is_some()) + u16::from(summary.session_closed);
+    // Reserve the Done button, destination, and session-note rows at the bottom.
+    let reserved = u16::from(summary.destination.is_some()) + u16::from(summary.session_closed) + 1;
     let list_start = inner.y.saturating_add(3);
     let list_end = (inner.y + inner.height)
         .saturating_sub(reserved)
@@ -189,7 +200,13 @@ pub(super) fn render_summary_panel(frame: &mut Frame<'_>, area: Rect, model: &Ap
     }
 
     let bottom = inner.y + inner.height;
-    let mut footer_y = bottom;
+    // The Done button always owns the last card row.
+    dialog::render_buttons(
+        frame,
+        Rect::new(inner.x, bottom.saturating_sub(1), inner.width, 1),
+        &[Button::new("Done", true)],
+    );
+    let mut footer_y = bottom.saturating_sub(1);
     if summary.session_closed {
         footer_y = footer_y.saturating_sub(1);
         render_panel_line(

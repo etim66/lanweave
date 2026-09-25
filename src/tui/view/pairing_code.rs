@@ -35,8 +35,8 @@ pub(super) fn render(
         return;
     }
 
-    let stack = centered_rect(area, surface_width(area), 9);
-    let show_hints = stack.height >= 8;
+    let stack = centered_rect(area, surface_width(area), 11);
+    let show_hints = stack.height >= 10;
     let card = Rect::new(
         stack.x,
         stack.y,
@@ -89,12 +89,12 @@ pub(super) fn render(
         }
     }
 
-    if inner.height >= 6 {
+    if inner.height >= 8 {
         render_panel_line(
             frame,
             Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
             Line::styled(
-                "The code is shown on the other device and expires after about two minutes.",
+                "The other device shows this code; it expires after about two minutes.",
                 Style::new().fg(MUTED),
             ),
         );

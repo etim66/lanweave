@@ -25,6 +25,33 @@ pub(crate) struct CommandPalette {
     pub(crate) selected: Option<CommandId>,
 }
 
+/// Which of a dialog's two decision buttons is focused.
+///
+/// The focused button is activated with Enter; the arrow keys move between
+/// buttons so a non-developer never has to discover Escape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DialogFocus {
+    #[default]
+    Accept,
+    Reject,
+}
+
+impl DialogFocus {
+    /// Moves the focus to the other button.
+    fn toggle(&mut self) {
+        *self = match self {
+            Self::Accept => Self::Reject,
+            Self::Reject => Self::Accept,
+        };
+    }
+}
+
+/// Live focus for the inbound pairing decision dialog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PairingPromptInput {
+    pub(crate) focus: DialogFocus,
+}
+
 /// Live direct-address input line and its validation result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DirectAddressInput {
@@ -104,6 +131,7 @@ impl PairingCodeInput {
 pub(crate) enum Overlay {
     CommandPalette(CommandPalette),
     DirectAddress(DirectAddressInput),
+    PairingPrompt(PairingPromptInput),
     PairingCode(PairingCodeInput),
     FileSelection(FileSelectionInput),
     TransferReview(TransferReviewInput),
@@ -141,6 +169,8 @@ pub(crate) struct TransferReviewInput {
     pub(crate) destination: String,
     /// Why the current destination cannot be accepted.
     pub(crate) error: Option<&'static str>,
+    /// Which decision button is focused.
+    pub(crate) focus: DialogFocus,
 }
 
 impl TransferReviewInput {
@@ -149,6 +179,7 @@ impl TransferReviewInput {
         Self {
             destination: destination.to_string_lossy().into_owned(),
             error: None,
+            focus: DialogFocus::Accept,
         }
     }
 }
@@ -233,6 +264,7 @@ pub(crate) fn apply_key_input(
                     }
                 }
                 KeyInput::Escape => return None,
+                KeyInput::Left | KeyInput::Right => {}
             }
             ui.overlay = Some(Overlay::CommandPalette(palette));
             None
@@ -255,6 +287,27 @@ pub(crate) fn apply_key_input(
                 _ => {}
             }
             ui.overlay = Some(Overlay::DirectAddress(address));
+            None
+        }
+        Some(Overlay::PairingPrompt(mut prompt)) => {
+            match input {
+                KeyInput::Left | KeyInput::Right | KeyInput::Up | KeyInput::Down => {
+                    prompt.focus.toggle();
+                }
+                KeyInput::Enter => {
+                    return Some(match prompt.focus {
+                        DialogFocus::Accept => UserAction::AcceptPairing,
+                        DialogFocus::Reject => UserAction::RejectPairing,
+                    });
+                }
+                KeyInput::Character(character) if character.eq_ignore_ascii_case(&'q') => {
+                    return Some(UserAction::Quit);
+                }
+                // Escape stays a shortcut for the focused reject choice.
+                KeyInput::Escape => return Some(UserAction::RejectPairing),
+                _ => {}
+            }
+            ui.overlay = Some(Overlay::PairingPrompt(prompt));
             None
         }
         Some(Overlay::PairingCode(mut code_input)) => {
@@ -324,6 +377,7 @@ pub(crate) fn apply_key_input(
                 }
                 KeyInput::Up => move_file_selection(&mut files, false),
                 KeyInput::Down => move_file_selection(&mut files, true),
+                KeyInput::Left | KeyInput::Right => {}
                 KeyInput::Escape => return None,
             }
             ui.overlay = Some(Overlay::FileSelection(files));
@@ -343,14 +397,21 @@ pub(crate) fn apply_key_input(
                     review.destination.pop();
                     review.error = None;
                 }
-                KeyInput::Enter => match validate_destination(Path::new(&review.destination)) {
-                    Ok(()) => {
-                        return Some(UserAction::AcceptTransfer(PathBuf::from(
-                            &review.destination,
-                        )));
+                KeyInput::Left | KeyInput::Right => review.focus.toggle(),
+                KeyInput::Enter => match review.focus {
+                    DialogFocus::Reject => return Some(UserAction::RejectTransfer),
+                    DialogFocus::Accept => {
+                        match validate_destination(Path::new(&review.destination)) {
+                            Ok(()) => {
+                                return Some(UserAction::AcceptTransfer(PathBuf::from(
+                                    &review.destination,
+                                )));
+                            }
+                            Err(_) => review.error = Some("Enter an existing directory"),
+                        }
                     }
-                    Err(_) => review.error = Some("Enter an existing directory"),
                 },
+                // Escape stays a shortcut for the focused reject choice.
                 KeyInput::Escape => return Some(UserAction::RejectTransfer),
                 _ => {}
             }
@@ -382,17 +443,26 @@ pub(crate) fn apply_key_input(
             KeyInput::Enter | KeyInput::Escape if model.state() == AppState::TransferComplete => {
                 Some(UserAction::DismissSummary)
             }
-            KeyInput::Escape
-                if matches!(
-                    model.state(),
-                    AppState::OutboundProposal
-                        | AppState::TransferringOutbound
-                        | AppState::TransferringInbound
-                ) =>
+            // Waiting screens show one highlighted action; Enter activates it
+            // and Escape stays a shortcut.
+            KeyInput::Enter | KeyInput::Escape
+                if matches!(model.state(), AppState::OutboundProposal)
+                    || model.state().is_transfer_active() =>
             {
                 Some(UserAction::CancelTransfer)
             }
-            // The in-person pairing prompt is decided with Enter and Escape.
+            KeyInput::Enter | KeyInput::Escape
+                if matches!(
+                    model.state(),
+                    AppState::PairingOutbound
+                        | AppState::PairingConfirming
+                        | AppState::PairingInboundAccepted
+                ) =>
+            {
+                Some(UserAction::Disconnect)
+            }
+            // The pairing prompt is a dialog now, but the direct keys stay for
+            // terminals that deliver no dialog overlay.
             KeyInput::Enter if model.state() == AppState::PairingInbound => {
                 Some(UserAction::AcceptPairing)
             }
@@ -530,6 +600,15 @@ pub(crate) fn reconcile(model: &AppModel, ui: &mut UiState) {
             reconcile_selection(model.capabilities(), &palette.query, palette.selected);
     }
 
+    // The inbound pairing prompt is a required decision dialog.
+    if model.state() == AppState::PairingInbound {
+        if !matches!(ui.overlay, Some(Overlay::PairingPrompt(_))) {
+            ui.overlay = Some(Overlay::PairingPrompt(PairingPromptInput::default()));
+        }
+    } else if matches!(ui.overlay, Some(Overlay::PairingPrompt(_))) {
+        ui.overlay = None;
+    }
+
     if model.state() == AppState::PairingOutboundAccepted {
         if !matches!(ui.overlay, Some(Overlay::PairingCode(_))) {
             ui.overlay = Some(Overlay::PairingCode(PairingCodeInput::new()));
@@ -649,8 +728,8 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{
-        MAX_DESTINATION_INPUT_BYTES, Overlay, UiState, apply_key_input, apply_paste, apply_review,
-        apply_user_action, reconcile, take_review_work,
+        DialogFocus, MAX_DESTINATION_INPUT_BYTES, Overlay, UiState, apply_key_input, apply_paste,
+        apply_review, apply_user_action, reconcile, take_review_work,
     };
     use crate::app::action::{DirectAddressError, DirectEndpoint, KeyInput, UserAction};
     use crate::app::event::AppEvent;
@@ -923,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn review_overlay_closes_when_the_state_cannot_host_it() {
+    fn required_prompts_replace_the_review_overlay() {
         let mut ui = UiState::default();
         assert!(apply_user_action(
             &AppModel::for_test(AppState::Browsing),
@@ -932,8 +1011,16 @@ mod tests {
         ));
         assert!(matches!(ui.overlay(), Some(Overlay::FileSelection(_))));
 
+        // The required pairing decision replaces the local review list.
         let pairing = AppModel::for_test(AppState::PairingInbound);
         reconcile(&pairing, &mut ui);
+        let Some(Overlay::PairingPrompt(prompt)) = ui.overlay() else {
+            panic!("the pairing dialog must open");
+        };
+        assert_eq!(prompt.focus, DialogFocus::Accept);
+
+        // Leaving the prompt state closes the dialog again.
+        reconcile(&AppModel::for_test(AppState::Home), &mut ui);
         assert_eq!(ui.overlay(), None);
     }
 
@@ -1015,7 +1102,7 @@ mod tests {
 
         for state in [
             AppState::Starting,
-            AppState::PairingOutbound,
+            AppState::Home,
             AppState::SessionIdle,
             AppState::Error(FailureKind::Internal),
         ] {
@@ -1119,10 +1206,59 @@ mod tests {
             Some(UserAction::RejectPairing)
         );
 
-        // The same keys do nothing on other pairing screens.
+        // Arrow keys move the focus to Reject, where Enter rejects.
+        reconcile(&model, &mut ui);
+        apply_key_input(&model, &mut ui, KeyInput::Right);
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::RejectPairing)
+        );
+
+        // The waiting screen cancels the request with either key.
         let outbound = AppModel::for_test(AppState::PairingOutbound);
-        assert_eq!(apply_key_input(&outbound, &mut ui, KeyInput::Enter), None);
-        assert_eq!(apply_key_input(&outbound, &mut ui, KeyInput::Escape), None);
+        assert_eq!(
+            apply_key_input(&outbound, &mut ui, KeyInput::Enter),
+            Some(UserAction::Disconnect)
+        );
+        assert_eq!(
+            apply_key_input(&outbound, &mut ui, KeyInput::Escape),
+            Some(UserAction::Disconnect)
+        );
+    }
+
+    #[test]
+    fn waiting_screens_offer_a_visible_cancel_action() {
+        // The receiver's code screen and the code check both cancel with Enter
+        // or Escape; there is no silent state anymore.
+        for state in [
+            AppState::PairingInboundAccepted,
+            AppState::PairingConfirming,
+        ] {
+            let model = AppModel::for_test(state);
+            let mut ui = UiState::default();
+            assert_eq!(
+                apply_key_input(&model, &mut ui, KeyInput::Enter),
+                Some(UserAction::Disconnect),
+                "state: {state:?}"
+            );
+            assert_eq!(
+                apply_key_input(&model, &mut ui, KeyInput::Escape),
+                Some(UserAction::Disconnect),
+                "state: {state:?}"
+            );
+        }
+
+        let busy = AppModel::for_test(AppState::OutboundProposal);
+        let mut ui = UiState::default();
+        assert_eq!(
+            apply_key_input(&busy, &mut ui, KeyInput::Enter),
+            Some(UserAction::CancelTransfer)
+        );
+        let active = AppModel::for_test(AppState::TransferringOutbound);
+        assert_eq!(
+            apply_key_input(&active, &mut ui, KeyInput::Enter),
+            Some(UserAction::CancelTransfer)
+        );
     }
 
     #[test]
@@ -1239,6 +1375,15 @@ mod tests {
         reconcile(&model, &mut ui);
         assert_eq!(
             apply_key_input(&model, &mut ui, KeyInput::Escape),
+            Some(UserAction::RejectTransfer)
+        );
+        assert_eq!(ui.overlay(), None);
+
+        // Right focuses Reject, where Enter rejects as well.
+        reconcile(&model, &mut ui);
+        apply_key_input(&model, &mut ui, KeyInput::Right);
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
             Some(UserAction::RejectTransfer)
         );
         assert_eq!(ui.overlay(), None);

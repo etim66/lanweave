@@ -11,14 +11,14 @@ Lanweave is currently a work in progress. The TUI shell, live discovery, the pro
 
 1. Both users run `lanweave`. A device advertises and accepts requests only while Lanweave is running. A stale network record may remain visible briefly after an unclean exit, but connection will fail and the record will expire.
 2. User 1 opens the device list with `/devices`, selects User 2's device, and requests pairing.
-3. User 2 sees the request and accepts or rejects it.
-4. If User 2 accepts, their Lanweave app creates and displays a one-time eight-digit code. User 2 shows that code to User 1.
+3. User 2 sees the request and chooses **Accept** or **Reject**.
+4. If User 2 accepts, their Lanweave app creates and displays a one-time eight-digit code. User 2 shares that code with User 1 to authorize the session.
 5. User 1 enters the code. Lanweave checks the code and creates an authenticated, encrypted session between the two devices.
 6. Either user can paste file or folder paths into the TUI, review them, and select **Send**. Folders are compressed into a single zip archive before the request is sent.
-7. The other user sees a request with the names, sizes, count, and total size, including folder item counts, chooses the destination directory, and can accept or reject it.
+7. The other user sees a request with the names, sizes, count, and total size, including folder item counts, chooses the destination directory, and chooses **Accept** or **Reject** in the same dialog.
 8. Accepted files are sent in order with live per-file progress. Each file is checked before it is saved under its final name.
 9. Both users see a completion summary; the receiver also sees the directory the files were saved to.
-10. After a transfer, either user can request another transfer in the same session, or cancel a pending or active one with Escape or `/cancel`.
+10. After a transfer, either user can request another transfer in the same session, or use the highlighted cancel button (or Escape, or `/cancel`) on a pending or active one.
 11. Either user can close the session. Lanweave also closes it after 10 minutes with no transfer request or active transfer.
 
 Closing the session removes its temporary authorization. The users must repeat the pairing and code flow before sending more files. Lanweave does not keep a trusted-device list.
@@ -38,10 +38,11 @@ The app is interactive rather than a set of one-shot shell commands.
   Listed device names are untrusted until pairing confirms the live connection.
 - Use `/connect` to enter a `host:port` directly when discovery is unavailable.
   The input validates the address before a connection can start.
-- When the peer's app shows your pairing request, press Enter to accept or
-  Escape to reject it. The peer name and address are untrusted.
-- If the peer accepts, they read the eight-digit code from their screen and you
-  type it: digits to enter, Backspace to edit, Enter to submit, Escape to
+- A request that needs your decision appears as a highlighted dialog with
+  buttons. Use Left/Right to move between **Accept** and **Reject** and press
+  Enter to choose; Escape still rejects directly.
+- When the peer accepts, they read the eight-digit code from their screen and
+  you type it: digits to enter, Backspace to edit, Enter to submit, Escape to
   cancel. The code expires after about two minutes.
 - Use `/send` to review files and folders before a transfer. Paste one path per line (or a quoted path); `file://` URIs and shell-escaped spaces are also accepted, and pasted paths are reviewed off the event loop so large folders do not block the screen. Press Enter to send, Backspace to remove the highlighted entry, and Escape to close. Pasting with no dialog open opens the review list directly.
 - `/send` opens the review list while browsing or in an idle session, but files

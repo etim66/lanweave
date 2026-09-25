@@ -213,6 +213,8 @@ pub(crate) enum KeyInput {
     Escape,
     Up,
     Down,
+    Left,
+    Right,
 }
 
 #[cfg(test)]

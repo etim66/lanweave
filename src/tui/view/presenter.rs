@@ -1,6 +1,5 @@
 use ratatui::style::Color;
 
-use crate::app::action::PairingPeer;
 use crate::app::failure::FailureKind;
 use crate::app::model::{AppModel, AppState, Screen};
 use crate::discovery::escape_display;
@@ -100,7 +99,7 @@ fn transfer_content(model: &AppModel) -> (String, String, Color) {
                 return (
                     "Compressing folder".to_owned(),
                     format!(
-                        "Building {} · {}/{} items. Press esc to cancel.",
+                        "Building {} · {}/{} items.",
                         escape_display(&preparation.name),
                         preparation.items_done,
                         preparation.items_total
@@ -174,22 +173,17 @@ pub(super) fn format_size(bytes: u64) -> String {
 /// Peer names come from untrusted `hello` text; the wording keeps that limit
 /// visible on every prompt until confirmation succeeds.
 fn pairing_content(model: &AppModel) -> (String, String, Color) {
-    let peer = model
-        .pairing_peer()
-        .map(describe_peer)
-        .unwrap_or_else(|| "the other device".to_owned());
+    let peer = pairing_peer_label(model);
 
     match model.state() {
         AppState::PairingOutbound => (
             "Waiting for response".to_owned(),
-            format!(
-                "Pairing request sent to {peer}. The name is untrusted until pairing confirms the device."
-            ),
+            format!("Pairing request sent to {peer}. Waiting for the other device to respond."),
             ACCENT,
         ),
         AppState::PairingOutboundAccepted => (
             "Enter the pairing code".to_owned(),
-            "Type the eight-digit code shown on the other device, then press enter.".to_owned(),
+            "Enter the eight-digit code shown on the other device, then press enter.".to_owned(),
             ACCENT,
         ),
         AppState::PairingConfirming => (
@@ -200,7 +194,7 @@ fn pairing_content(model: &AppModel) -> (String, String, Color) {
         AppState::PairingInbound => (
             "Pairing request".to_owned(),
             format!(
-                "{peer} wants to pair. The name and address are untrusted; accept only if the person is present."
+                "{peer} wants to pair. The name is untrusted; accept only if the person is with you."
             ),
             ACCENT,
         ),
@@ -210,9 +204,9 @@ fn pairing_content(model: &AppModel) -> (String, String, Color) {
                 .map(|code| code.grouped())
                 .unwrap_or_else(|| "........".to_owned());
             (
-                "Pairing code".to_owned(),
+                "Share this code".to_owned(),
                 format!(
-                    "Tell the other device: {code}\nThe code expires after about two minutes and is never sent over the connection."
+                    "Give this code to the sender to authorize the session: {code}\nIt expires after about two minutes and is never sent over the connection."
                 ),
                 ACCENT,
             )
@@ -231,10 +225,13 @@ fn pairing_content(model: &AppModel) -> (String, String, Color) {
 }
 
 /// Describes a peer for a pairing prompt without presenting it as verified.
-fn describe_peer(peer: &PairingPeer) -> String {
-    match peer.display_name() {
-        Some(name) => format!("{name} ({})", peer.endpoint()),
-        None => peer.endpoint().to_owned(),
+///
+/// Only the friendly name is shown; the network address is technical detail a
+/// non-developer cannot act on, and it never proves identity anyway.
+pub(super) fn pairing_peer_label(model: &AppModel) -> String {
+    match model.pairing_peer().map(|peer| peer.display_name()) {
+        Some(Some(name)) if !name.is_empty() => name.to_owned(),
+        _ => "A device on your network".to_owned(),
     }
 }
 
