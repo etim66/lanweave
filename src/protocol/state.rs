@@ -711,14 +711,8 @@ mod tests {
     fn transfer_request() -> Control {
         Control::TransferRequest(
             TransferRequest::new(vec![
-                FileEntry {
-                    name: "a.bin".to_owned(),
-                    size: 5,
-                },
-                FileEntry {
-                    name: "b.txt".to_owned(),
-                    size: 0,
-                },
+                FileEntry::new("a.bin".to_owned(), 5),
+                FileEntry::new("b.txt".to_owned(), 0),
             ])
             .unwrap(),
         )
@@ -928,11 +922,7 @@ mod tests {
         let (mut a, mut b) = paired();
         let initiator_request = transfer_request();
         let responder_request = Control::TransferRequest(
-            TransferRequest::new(vec![FileEntry {
-                name: "c.bin".to_owned(),
-                size: 1,
-            }])
-            .unwrap(),
+            TransferRequest::new(vec![FileEntry::new("c.bin".to_owned(), 1)]).unwrap(),
         );
         send(&mut a, &initiator_request).unwrap();
         send(&mut b, &responder_request).unwrap();
