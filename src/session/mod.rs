@@ -671,6 +671,15 @@ async fn initiator_flow(
     outcome
 }
 
+/// Builds the local `hello` with the computer name as display text.
+///
+/// The name is untrusted display text to the peer, exactly like any other
+/// `display_name`; it is only presented as a hint until pairing confirms the
+/// live connection.
+fn local_hello() -> Control {
+    Control::Hello(Hello::new(Some(crate::hostname::local_hostname())))
+}
+
 /// Runs the initiator pairing stages over an established connection.
 async fn initiator_pairing(
     connection: &mut SessionConnection,
@@ -680,11 +689,9 @@ async fn initiator_pairing(
     timeouts: SessionTimeouts,
 ) -> FlowOutcome {
     // The initiator sends the first hello and retains the exact JSON body.
-    let initiator_hello = Bytes::from(Control::Hello(Hello::new(None)).encode());
-    if let Err(outcome) = connection
-        .send_control(&Control::Hello(Hello::new(None)))
-        .await
-    {
+    let hello = local_hello();
+    let initiator_hello = Bytes::from(hello.encode());
+    if let Err(outcome) = connection.send_control(&hello).await {
         return outcome;
     }
     let inbound =
@@ -876,9 +883,7 @@ async fn busy_pairing(
     if !matches!(inbound.control, Control::Hello(_)) {
         return Err(FlowOutcome::Failed);
     }
-    connection
-        .send_control(&Control::Hello(Hello::new(None)))
-        .await?;
+    connection.send_control(&local_hello()).await?;
     let inbound = read_control_only(connection, Instant::now() + timeouts.control).await?;
     if !matches!(inbound.control, Control::PairRequest) {
         return Err(FlowOutcome::Failed);
@@ -914,11 +919,9 @@ async fn responder_pairing(
     };
     let initiator_hello = inbound.body;
     connection.peer_name = display_name.clone();
-    let responder_hello = Bytes::from(Control::Hello(Hello::new(None)).encode());
-    if let Err(outcome) = connection
-        .send_control(&Control::Hello(Hello::new(None)))
-        .await
-    {
+    let hello = local_hello();
+    let responder_hello = Bytes::from(hello.encode());
+    if let Err(outcome) = connection.send_control(&hello).await {
         return outcome;
     }
     match read_control(connection, &mut commands, Instant::now() + timeouts.control).await {

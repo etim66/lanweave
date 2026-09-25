@@ -7,6 +7,7 @@ mod app;
 mod bootstrap;
 mod discovery;
 mod framing;
+mod hostname;
 mod pairing;
 mod protocol;
 mod session;

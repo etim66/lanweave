@@ -34,6 +34,8 @@ SRV supplies the host and port. TXT contains only this untrusted hint:
 | --- | --- | --- |
 | `v` | `1` | The listener expects experimental protocol version 1 |
 
+The service instance is the local computer name, sanitized into a DNS label with its original casing; the host record stays a per-run lowercase label so it cannot collide with the platform mDNS responder. The `hello` display name carries the same computer name.
+
 Discovery records do not contain pairing codes, identity fingerprints, file metadata, transfer state, capabilities, or trusted-device data. Service and host names are untrusted text and must be safely escaped before they reach a terminal.
 
 ## Device List
