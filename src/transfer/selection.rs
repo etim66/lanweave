@@ -126,8 +126,20 @@ impl FileSelection {
     pub(crate) fn add_text(&mut self, input: &str) -> Vec<SelectionIssue> {
         let mut issues = Vec::new();
         for path in parse_paths(input) {
-            if let Err(reason) = self.add_path(Path::new(&path)) {
-                issues.push(SelectionIssue::new(&path, reason));
+            match self.add_path(Path::new(&path)) {
+                Ok(()) => {}
+                Err(reason) => {
+                    // Terminals escape spaces and punctuation in drag-and-drop
+                    // paths. Retry the unescaped form only when the literal
+                    // path does not exist, so real backslashes survive.
+                    if reason == "the file was not found" {
+                        let unescaped = unescape_shell(&path);
+                        if unescaped != path && self.add_path(Path::new(&unescaped)).is_ok() {
+                            continue;
+                        }
+                    }
+                    issues.push(SelectionIssue::new(&path, reason));
+                }
             }
         }
         issues
@@ -190,18 +202,87 @@ impl FileSelection {
 
 /// Splits pasted text into candidate paths without invoking a shell.
 ///
-/// Newlines separate entries. Each entry is trimmed and one matching pair of
-/// outer single or double quotes is removed. Inside double quotes, `\\` and
-/// `\"` are unescaped; every other backslash is kept so Windows paths and
-/// unquoted paths with spaces survive unchanged.
+/// Newlines separate entries. Each entry is trimmed, `file://` URIs are
+/// percent-decoded, and one matching pair of outer single or double quotes is
+/// removed. Inside double quotes, `\\` and `\"` are unescaped; every other
+/// backslash is kept so Windows paths and unquoted paths with spaces survive.
 pub(crate) fn parse_paths(input: &str) -> Vec<String> {
     input
         .split('\n')
         .filter_map(|line| {
             let line = line.strip_suffix('\r').unwrap_or(line).trim();
-            (!line.is_empty()).then(|| unquote(line))
+            (!line.is_empty()).then(|| normalize_entry(line))
         })
+        .filter(|entry| !entry.is_empty())
         .collect()
+}
+
+/// Converts one pasted entry into a candidate path.
+fn normalize_entry(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("file://") {
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        return percent_decode(path);
+    }
+    unquote(line)
+}
+
+/// Decodes `%XX` escapes in a URI path, leaving invalid escapes intact.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = hex_value(bytes[index + 1]);
+            let low = hex_value(bytes[index + 2]);
+            if let (Some(high), Some(low)) = (high, low) {
+                decoded.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Returns the value of one hexadecimal digit.
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Removes shell backslash escapes from a path that does not exist as typed.
+///
+/// Only characters terminals commonly escape are unescaped, so Windows
+/// separators and unknown sequences are preserved.
+fn unescape_shell(path: &str) -> String {
+    const ESCAPABLE: [char; 13] = [
+        ' ', '(', ')', '[', ']', '{', '}', '&', '\'', '"', '$', '#', ';',
+    ];
+
+    let mut output = String::with_capacity(path.len());
+    let mut characters = path.chars();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            match characters.next() {
+                Some(next) if ESCAPABLE.contains(&next) => output.push(next),
+                Some(other) => {
+                    output.push('\\');
+                    output.push(other);
+                }
+                None => output.push('\\'),
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 /// Removes one matching outer quote pair, if present.
@@ -294,6 +375,10 @@ mod tests {
             ("'a b.txt'\r\n\"c d.txt\"\n", vec!["a b.txt", "c d.txt"]),
             ("\"e \\\"q\\\".txt\"", vec!["e \"q\".txt"]),
             ("\"C:\\\\dir\\\\file.txt\"", vec!["C:\\dir\\file.txt"]),
+            (
+                "file:///home/me/a%20b.txt\nfile://localhost/tmp/x\n",
+                vec!["/home/me/a b.txt", "/tmp/x"],
+            ),
             ("\"C:\\dir\\file.txt\"", vec!["C:\\dir\\file.txt"]),
             ("  \n\n ", vec![]),
             ("'unbalanced", vec!["'unbalanced"]),
@@ -421,4 +506,26 @@ mod tests {
     fn empty_selections_have_no_manifest() {
         assert!(FileSelection::default().request().is_none());
     }
+
+    #[test]
+    fn escaped_and_uri_paths_are_reviewed_when_the_literal_form_is_missing() {
+        let root = temp_root("escapes");
+        let spaced = write_file(&root, "my report.txt", b"data");
+
+        let mut escaped = FileSelection::default();
+        let input = spaced.display().to_string().replace(' ', "\\ ");
+        assert!(escaped.add_text(&input).is_empty());
+        assert_eq!(escaped.files()[0].path(), spaced);
+        assert_eq!(escaped.files()[0].name(), "my report.txt");
+
+        let mut uri = FileSelection::default();
+        let input = format!(
+            "file://{}",
+            spaced.display().to_string().replace(' ', "%20")
+        );
+        assert!(uri.add_text(&input).is_empty());
+        assert_eq!(uri.files()[0].path(), spaced);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }
