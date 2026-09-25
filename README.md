@@ -55,6 +55,9 @@ The app is interactive rather than a set of one-shot shell commands.
   the session screen with a notice and keeps the reviewed files queued. Waiting
   screens show a single highlighted button, so Enter and Escape both cancel.
   `/disconnect` is available only while connected, and `/quit` closes Lanweave.
+- Use `/update` to check for a newer release. When one exists, the app shows
+  its version and asks you to confirm before anything is downloaded; a
+  finished update runs after you restart Lanweave.
 
 The exact command names may change during implementation, but `/` will always show the available actions.
 
@@ -78,7 +81,7 @@ Directories are sent only as zip archives; resume, parallel file transfer, overw
 
 ## Technical Shape
 
-The first implementation is one Cargo package with a private library implementation and a thin binary entry point. Internal modules are `bootstrap`, `tui`, `app`, `session`, `protocol`, `framing`, `transport`, `pairing`, `transfer`, `storage`, and `discovery`.
+The first implementation is one Cargo package with a private library implementation and a thin binary entry point. Internal modules are `bootstrap`, `tui`, `app`, `session`, `protocol`, `framing`, `transport`, `pairing`, `transfer`, `storage`, `discovery`, and `update`.
 
 Likely dependency families include:
 
@@ -92,6 +95,30 @@ Likely dependency families include:
 - `zeroize` for best-effort secret cleanup.
 
 The pairing adapter wraps an RFC 9382 SPAKE2-P256-SHA256-HKDF-HMAC implementation (`pakery-spake2` with `pakery-crypto`) as an unaudited prototype. Lanweave must not implement cryptographic group arithmetic itself. See [Cryptography](docs/CRYPTOGRAPHY.md) for the release-blocking security work.
+
+## Installing
+
+Linux (x86_64 and arm64) and Windows (x64) builds are published as GitHub
+Releases. The installer places `lanweave` in `~/.lanweave/bin` and adds that
+directory to `PATH` when needed.
+
+Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/etim66/lanweave/releases/latest/download/lanweave-installer.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -c "irm https://github.com/etim66/lanweave/releases/latest/download/lanweave-installer.ps1 | iex"
+```
+
+Run `/update` inside the app to check for and install a newer version. Only
+copies installed by the installer can update themselves; see
+[Updates](docs/UPDATES.md) for the details, the uninstall steps, and the trust
+model.
 
 ## Building
 
@@ -126,6 +153,8 @@ Run `make check` for the formatting, lint, and test gate used during normal deve
 | [Threat model](docs/THREAT_MODEL.md) | Threats, controls, and remaining risks |
 | [Testing strategy](docs/TESTING_STRATEGY.md) | TUI, protocol, filesystem, and security tests |
 | [Implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md) | High-level dependency gates |
+| [Releasing](docs/RELEASING.md) | Version, tag, and release workflow |
+| [Updates](docs/UPDATES.md) | `/update` eligibility, behavior, and trust model |
 | [Glossary](docs/GLOSSARY.md) | Plain-language project terms |
 
 ## Security Status

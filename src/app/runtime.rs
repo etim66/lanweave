@@ -148,6 +148,16 @@ impl AppRuntime {
                 self.start_review();
                 Vec::new()
             }
+            // Update results only affect the local dialog; the model keeps no
+            // update state.
+            AppEvent::UpdateChecked(check) => {
+                interaction::apply_update_check(&mut self.ui, check);
+                Vec::new()
+            }
+            AppEvent::UpdateApplied(result) => {
+                interaction::apply_update_result(&mut self.ui, result);
+                Vec::new()
+            }
             event => update(&mut self.model, event),
         };
 
@@ -221,7 +231,6 @@ impl AppRuntime {
         let _ = self.send_effects(effects).await;
     }
 }
-
 #[cfg(test)]
 mod tests {
     use tokio::sync::mpsc::error::TrySendError;
@@ -602,6 +611,58 @@ mod tests {
         assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
         assert_eq!(effect_receiver.recv().await, None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn update_dialog_tracks_check_and_install_results() {
+        use crate::app::interaction::{Overlay, UpdatePhase};
+        use crate::update::UpdateCheck;
+
+        let (event_sender, event_receiver) = event_channel();
+        let (effect_sender, mut effect_receiver) = effect_channel();
+        let mut phases = Vec::new();
+
+        for event in [
+            AppEvent::StartupCompleted,
+            AppEvent::User(UserAction::CheckForUpdate),
+            AppEvent::UpdateChecked(UpdateCheck::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            }),
+            AppEvent::User(UserAction::ApplyUpdate),
+            AppEvent::UpdateApplied(Ok("0.2.0".to_owned())),
+        ] {
+            event_sender.send(event).await.unwrap();
+        }
+        drop(event_sender);
+
+        let model = AppRuntime::new(event_receiver, effect_sender)
+            .run_with_observer(|_, ui| {
+                if let Some(Overlay::Update(update)) = ui.overlay() {
+                    phases.push(update.phase.clone());
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(model.state(), AppState::ShuttingDown);
+        assert!(phases.contains(&UpdatePhase::Checking));
+        assert!(phases.contains(&UpdatePhase::Available {
+            current: "0.1.0".to_owned(),
+            new: "0.2.0".to_owned(),
+        }));
+        assert!(phases.contains(&UpdatePhase::Installing {
+            new: "0.2.0".to_owned(),
+        }));
+        assert!(phases.contains(&UpdatePhase::Installed {
+            new: "0.2.0".to_owned(),
+        }));
+
+        assert_eq!(effect_receiver.recv().await, Some(Effect::CheckForUpdate));
+        assert_eq!(effect_receiver.recv().await, Some(Effect::ApplyUpdate));
+        assert_eq!(effect_receiver.recv().await, Some(Effect::Shutdown));
+        assert_eq!(effect_receiver.recv().await, None);
     }
 
     #[tokio::test]

@@ -125,6 +125,10 @@ fn apply_user_action(model: &mut AppModel, action: UserAction) -> Vec<Effect> {
             }
             Some(Effect::Disconnect)
         }
+        // Update actions are valid in every state that accepts commands; the
+        // dialog itself is owned by the UI layer.
+        (_, UserAction::CheckForUpdate) => Some(Effect::CheckForUpdate),
+        (_, UserAction::ApplyUpdate) => Some(Effect::ApplyUpdate),
         _ => None,
     };
 
@@ -535,6 +539,24 @@ mod tests {
                 AppState::Browsing,
                 AppEvent::Failed(FailureKind::Internal),
                 AppState::Error(FailureKind::Internal),
+                None,
+            ),
+            (
+                AppState::Home,
+                AppEvent::User(UserAction::CheckForUpdate),
+                AppState::Home,
+                Some(Effect::CheckForUpdate),
+            ),
+            (
+                AppState::SessionIdle,
+                AppEvent::User(UserAction::ApplyUpdate),
+                AppState::SessionIdle,
+                Some(Effect::ApplyUpdate),
+            ),
+            (
+                AppState::Home,
+                AppEvent::User(UserAction::DismissUpdate),
+                AppState::Home,
                 None,
             ),
         ];

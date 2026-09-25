@@ -46,6 +46,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     event_sender.send(AppEvent::StartupCompleted).await?;
     let input_sender = event_sender.clone();
     let discovery_event_sender = event_sender.clone();
+    let effect_event_sender = event_sender.clone();
     drop(event_sender);
 
     // --- Background tasks ---------------------------------------------------
@@ -58,6 +59,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         tokio::spawn(relay_discovery(discovery_receiver, discovery_event_sender));
     let effects = tokio::spawn(dispatch_effects(
         effect_receiver,
+        effect_event_sender,
         session,
         discovery,
         listener,
@@ -113,9 +115,11 @@ async fn relay_discovery(
 ///
 /// A shutdown effect stops the session owner and the network services, then
 /// reports that shutdown was handled. If the channel closes first, everything
-/// is stopped anyway and `Ok(false)` is returned.
+/// is stopped anyway and `Ok(false)` is returned. Update effects run as
+/// detached tasks that report their result back through the event channel.
 async fn dispatch_effects(
     mut effects: EffectReceiver,
+    events: EventSender,
     session: SessionService,
     mut discovery: MdnsDiscoveryService,
     mut listener: LocalListener,
@@ -162,6 +166,20 @@ async fn dispatch_effects(
             }
             Effect::CancelTransfer => {
                 session.send(SessionCommand::CancelTransfer).await?;
+            }
+            Effect::CheckForUpdate => {
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let result = crate::update::check().await;
+                    let _ = events.send(AppEvent::UpdateChecked(result)).await;
+                });
+            }
+            Effect::ApplyUpdate => {
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let result = crate::update::apply().await;
+                    let _ = events.send(AppEvent::UpdateApplied(result)).await;
+                });
             }
         }
     }

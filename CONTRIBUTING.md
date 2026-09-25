@@ -27,6 +27,7 @@ run dependency policy and advisory checks.
 | Domain state transitions | `src/app/reducer.rs` |
 | Overlay and command-palette behavior | `src/app/interaction.rs` |
 | Slash-command registry | `src/app/command_palette.rs` |
+| Release checks and self-update | `src/update/` |
 | Terminal input mapping | `src/tui/event.rs` |
 | Screens and visual components | `src/tui/view/` |
 | Terminal setup, cleanup, and panic handling | `src/tui/terminal/` |

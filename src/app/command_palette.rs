@@ -16,6 +16,7 @@ pub(crate) enum CommandId {
     Send,
     Cancel,
     Disconnect,
+    Update,
     Quit,
 }
 
@@ -38,7 +39,7 @@ pub(crate) struct CommandSpec {
 }
 
 /// The complete slash command table, in display order.
-const COMMANDS: [CommandSpec; 8] = [
+const COMMANDS: [CommandSpec; 9] = [
     CommandSpec {
         id: CommandId::Help,
         name: "/help",
@@ -87,6 +88,13 @@ const COMMANDS: [CommandSpec; 8] = [
         description: "Close the current connection",
         availability: disconnect_availability,
         action: UserAction::Disconnect,
+    },
+    CommandSpec {
+        id: CommandId::Update,
+        name: "/update",
+        description: "Check for and install a new version",
+        availability: always_available,
+        action: UserAction::CheckForUpdate,
     },
     CommandSpec {
         id: CommandId::Quit,
@@ -260,7 +268,7 @@ mod tests {
             .map(|command| command.name)
             .collect::<HashSet<_>>();
 
-        assert_eq!(commands.len(), 8);
+        assert_eq!(commands.len(), 9);
         assert_eq!(names.len(), commands.len());
         assert!(commands.iter().all(|command| command.name.starts_with('/')));
         assert_eq!(commands[0].action, UserAction::ShowHelp);
@@ -270,7 +278,8 @@ mod tests {
         assert_eq!(commands[4].action, UserAction::OpenFileSelection);
         assert_eq!(commands[5].action, UserAction::CancelTransfer);
         assert_eq!(commands[6].action, UserAction::Disconnect);
-        assert_eq!(commands[7].action, UserAction::Quit);
+        assert_eq!(commands[7].action, UserAction::CheckForUpdate);
+        assert_eq!(commands[8].action, UserAction::Quit);
     }
 
     #[test]
@@ -284,6 +293,14 @@ mod tests {
 
             assert_eq!(
                 availability(CommandId::Help),
+                if state == AppState::ShuttingDown {
+                    CommandAvailability::Hidden
+                } else {
+                    CommandAvailability::Enabled
+                }
+            );
+            assert_eq!(
+                availability(CommandId::Update),
                 if state == AppState::ShuttingDown {
                     CommandAvailability::Hidden
                 } else {

@@ -13,6 +13,7 @@ mod presenter;
 mod theme;
 mod transfer;
 mod transfer_review;
+mod update;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -66,6 +67,9 @@ pub(super) fn render(frame: &mut Frame<'_>, model: &AppModel, ui: &UiState) {
         }
         Some(Overlay::TransferReview(input)) => {
             transfer_review::render(frame, content, model, input);
+        }
+        Some(Overlay::Update(input)) => {
+            update::render(frame, content, model, input);
         }
         Some(Overlay::Help) => help::render(frame, content, model),
         None => home::render(frame, content, model, ui),
@@ -247,6 +251,58 @@ mod tests {
         apply_key_input(&model, &mut ui, KeyInput::Character('/'));
         assert!(!render_with_ui(&model, &ui, 24, 8).is_empty());
         assert!(!render_with_ui(&model, &ui, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn update_dialog_renders_each_phase() {
+        use crate::app::interaction::{UpdateInput, UpdatePhase};
+
+        let browsing = AppModel::for_test(AppState::Browsing);
+        let with_phase = |phase: UpdatePhase| {
+            UiState::for_test(Overlay::Update(UpdateInput {
+                phase,
+                focus: DialogFocus::Accept,
+            }))
+        };
+
+        let available = with_phase(UpdatePhase::Available {
+            current: "0.1.0".to_owned(),
+            new: "0.2.0".to_owned(),
+        });
+        let output = render_with_ui(&browsing, &available, 80, 24);
+        assert!(output.contains("v0.2.0 is available"));
+        assert!(output.contains("Update"));
+        assert!(output.contains("Cancel"));
+
+        // A live session is warned that the restart will end it.
+        let session = AppModel::for_test(AppState::SessionIdle);
+        let output = render_with_ui(&session, &available, 80, 24);
+        assert!(output.contains("Restarting ends the current session"));
+
+        let checking = with_phase(UpdatePhase::Checking);
+        assert!(
+            render_with_ui(&browsing, &checking, 80, 24).contains("Checking for a newer version")
+        );
+
+        let installed = with_phase(UpdatePhase::Installed {
+            new: "0.2.0".to_owned(),
+        });
+        let output = render_with_ui(&browsing, &installed, 80, 24);
+        assert!(output.contains("Updated to v0.2.0"));
+        assert!(output.contains("Quit now"));
+        assert!(output.contains("Later"));
+
+        let not_managed = with_phase(UpdatePhase::NotManaged);
+        let output = render_with_ui(&browsing, &not_managed, 80, 24);
+        assert!(output.contains("was not installed by the Lanweave installer"));
+        assert!(output.contains("lanweave-installer.sh"));
+
+        let failed = with_phase(UpdatePhase::Failed {
+            message: "Could not reach GitHub.".to_owned(),
+        });
+        let output = render_with_ui(&browsing, &failed, 80, 24);
+        assert!(output.contains("Could not reach GitHub."));
+        assert!(!render_with_ui(&browsing, &failed, 20, 4).is_empty());
     }
 
     #[test]
