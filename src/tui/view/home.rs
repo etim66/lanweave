@@ -110,7 +110,7 @@ fn render_brand(frame: &mut Frame<'_>, area: Rect) {
 /// Width of one large wordmark glyph in columns.
 const WORDMARK_GLYPH_WIDTH: u16 = 5;
 /// Height of the large wordmark in rows.
-const WORDMARK_HEIGHT: u16 = 4;
+const WORDMARK_HEIGHT: u16 = 5;
 
 /// Returns the large two-tone wordmark when `area` can hold it.
 ///
@@ -146,15 +146,18 @@ fn wordmark_lines(width: u16, height: u16) -> Option<Vec<Line<'static>>> {
     Some(lines)
 }
 
-/// Returns one row of a 5x4 block glyph, or `None` for an unknown character.
+/// Returns one row of a 5x5 block glyph, or `None` for an unknown character.
+///
+/// Every letter gets the full five rows so the `E` bars and the `N`/`W`
+/// diagonals stay readable at a glance.
 fn glyph_row(character: char, row: usize) -> Option<String> {
-    let bitmap: [u8; 4] = match character {
-        'L' => [0b10000, 0b10000, 0b10000, 0b11110],
-        'A' => [0b01110, 0b10001, 0b11111, 0b10001],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011],
-        'W' => [0b10001, 0b10001, 0b10101, 0b01010],
-        'E' => [0b11111, 0b10000, 0b11110, 0b11111],
-        'V' => [0b10001, 0b10001, 0b01010, 0b00100],
+    let bitmap: [u8; 5] = match character {
+        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        'A' => [0b01110, 0b10001, 0b11111, 0b10001, 0b10001],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001],
+        'W' => [0b10001, 0b10001, 0b10101, 0b10101, 0b01010],
+        'E' => [0b11111, 0b10000, 0b11110, 0b10000, 0b11111],
+        'V' => [0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
         _ => return None,
     };
     let bits = bitmap.get(row)?;

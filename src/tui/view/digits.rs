@@ -1,22 +1,24 @@
-/// A compact 3x3 block font for the eight pairing digits.
+/// A compact 3x5 block font for the eight pairing digits.
 ///
-/// Each glyph is three rows of three columns; digits are separated by one
-/// space and the two code halves by three, matching the grouped code.
-const GLYPHS: [[&str; 3]; 10] = [
-    ["█▀█", "█ █", "▀▀▀"],
-    [" █ ", "██ ", " █ "],
-    ["▀▀█", "█▀▀", "▀▀▀"],
-    ["▀▀█", " ▀█", "▀▀▀"],
-    ["█ █", "▀▀█", "  █"],
-    ["█▀▀", "▀▀█", "▀▀▀"],
-    ["█▀▀", "█▀█", "▀▀▀"],
-    ["▀▀█", "  █", "  █"],
-    ["█▀█", "█▀█", "▀▀▀"],
-    ["█▀█", "▀▀█", "▀▀▀"],
+/// Each glyph is three columns wide and five rows tall, which gives every
+/// digit a full-width baseline and keeps `1` distinct from `7`. Digits are
+/// separated by one space and the two code halves by three, matching the
+/// grouped code.
+const GLYPHS: [[&str; 5]; 10] = [
+    ["█▀█", "█ █", "█ █", "█ █", "▀▀▀"],
+    [" █ ", "██ ", " █ ", " █ ", "▀▀▀"],
+    ["▀▀█", "  █", "▀▀▀", "█  ", "▀▀▀"],
+    ["▀▀█", "  █", "▀▀▀", "  █", "▀▀▀"],
+    ["█ █", "█ █", "▀▀█", "  █", "  █"],
+    ["█▀▀", "█  ", "▀▀▀", "  █", "▀▀▀"],
+    ["█▀▀", "█  ", "█▀█", "█ █", "▀▀▀"],
+    ["▀▀█", "  █", " █ ", " █ ", " █ "],
+    ["█▀█", "█ █", "▀▀▀", "█ █", "▀▀▀"],
+    ["█▀█", "█ █", "▀▀█", "  █", "▀▀▀"],
 ];
 
 /// Number of rows in the large digit font.
-pub(super) const ROWS: usize = 3;
+pub(super) const ROWS: usize = 5;
 /// Width in columns of one large digit.
 pub(super) const WIDTH: usize = 3;
 
@@ -50,13 +52,36 @@ mod tests {
     use super::{ROWS, row, width};
 
     #[test]
-    fn every_digit_renders_three_tight_rows() {
+    fn every_digit_renders_five_tight_rows() {
         for value in 0..=9 {
             let digit = char::from_digit(value, 10).unwrap();
             for row_index in 0..ROWS {
                 assert_eq!(row(&[digit], row_index).chars().count(), 3);
             }
         }
+    }
+
+    #[test]
+    fn digits_have_a_distinct_shape() {
+        let glyphs: Vec<Vec<String>> = (0..=9)
+            .map(|value| {
+                let digit = char::from_digit(value, 10).unwrap();
+                (0..ROWS)
+                    .map(|row_index| row(&[digit], row_index))
+                    .collect()
+            })
+            .collect();
+
+        for (value, glyph) in glyphs.iter().enumerate() {
+            assert_eq!(
+                glyphs.iter().filter(|other| *other == glyph).count(),
+                1,
+                "digit {value} must not duplicate another digit"
+            );
+        }
+        // The baseline makes the one unmistakable.
+        assert_eq!(glyphs[1][ROWS - 1], "▀▀▀");
+        assert_eq!(glyphs[7][ROWS - 1], " █ ");
     }
 
     #[test]
