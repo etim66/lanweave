@@ -27,7 +27,7 @@ The code is not sent on the connection. Pairing output is used for confirmation,
 
 The implementation uses the `ring` crypto provider with SSL-over-1.3-only configuration:
 
-- `rustls` 0.23 selected with the `std` and `ring` features (the `tls12` feature is off, so TLS 1.2 is unsupported at compile time);
+- `rustls` 0.23 selected with the `std` and `ring` features; both configs restrict `with_protocol_versions` to TLS 1.3, so TLS 1.2 is never negotiated (the unified build enables the `tls12` feature through the updater's HTTP client, so "compiled out" is not the guarantee);
 - `tokio-rustls` 0.26 with the `ring` feature;
 - `rcgen` 0.14 for the fresh P-256 certificate per connection; and
 - `zeroize` for best-effort cleanup of the exporter.
