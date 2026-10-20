@@ -20,7 +20,7 @@ Attackers on the LAN may publish false devices, copy names, observe traffic shap
 | Idle resource retention | Close after 600 seconds without a transfer request | Active malicious traffic needs separate progress limits |
 | Malformed frames or JSON | Validate fixed lengths and strict schema before allocation or expensive work | Parser defects may remain |
 | Terminal escape injection | Escape peer text and control characters | Unicode look-alikes can still confuse users |
-| Path traversal and overwrite | Single safe names, platform checks, no-follow temp files, no-replace finalization | Filesystem edge cases need platform tests |
+| Path traversal and overwrite | Single safe names, platform checks, no-follow temp files, bounded copy names, no-replace finalization | Filesystem edge cases need platform tests |
 | Corrupt transfer | TLS integrity plus exact size and SHA-256 before finalization | A paired peer can intentionally choose harmful content |
 | Interrupted transfer | Delete current partial and keep verified files | A transfer is not all-or-nothing |
 | Authorization reuse | No trust database, TLS resume, reusable code, or reconnect token | Users must repeat pairing after every disconnect |

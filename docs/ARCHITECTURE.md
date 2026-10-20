@@ -56,7 +56,7 @@ owner connects those local adapters to `DATA` frames in a later feature.
 | `protocol` | Wire ordering and message validation | Sockets, files, or user consent |
 | `transport` | Bounded framed I/O | Authorization and consent policy |
 | `transfer` | Path review, manifest, folder archiving, bounded hashing and streaming | Terminal policy or wire ordering |
-| `storage` | Safe names, temporary files, no-overwrite finalization | TUI or wire policy |
+| `storage` | Safe names, temporary files, copy naming, no-overwrite finalization | TUI or wire policy |
 
 ## Application Event Loop
 
@@ -89,7 +89,7 @@ TUI ----------> app/state <---------- discovery adapter
 - Session state owns pairing, authorization, one active transfer, and the idle timer.
 - Protocol validation has no dependency on the TUI, sockets, mDNS, or filesystem APIs.
 - Transport carries bounded frames and reports events. It does not decide user consent.
-- Storage validates names, creates temporary files, and never invents overwrite or rename behavior.
+- Storage validates names, creates temporary files, never overwrites, and chooses bounded local copy names when a destination name is occupied.
 - The pairing adapter wraps a reviewed library. Lanweave does not implement group arithmetic.
 
 ## Session Ownership
@@ -136,6 +136,6 @@ Do not use `sender` and `receiver` as session-wide identities.
 
 ## Filesystem Boundary
 
-Before accepting a transfer, storage validates every filename against the destination platform, checks conflicts, confirms resource policy, and prepares the first temporary file. Unsafe, duplicate, equivalent, existing, or unpreparable names reject the whole request.
+Before accepting a transfer, storage validates every filename against the destination platform, checks intra-manifest conflicts, confirms resource policy, and prepares the first temporary file. Unsafe, duplicate, equivalent, or unpreparable names reject the whole request. An occupied destination name does not reject the request; finalization keeps the existing entry and publishes the incoming file under a bounded copy name.
 
-Incoming data is written only to the current temporary file. Exact size and digest verification are required before safe no-overwrite finalization. A later failure keeps the verified prefix and removes the current partial file.
+Incoming data is written only to the current temporary file. Exact size and digest verification are required before safe no-replace finalization. A later failure keeps the verified prefix and removes the current partial file.

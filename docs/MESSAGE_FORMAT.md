@@ -85,7 +85,7 @@ Exactly four records occur after an accepted `pair_response`: initiator Party A 
 {"type":"transfer_response","accepted":false,"reason":"user_rejected"}
 ```
 
-Allowed rejection reasons are `user_rejected`, `busy`, `timeout`, `invalid_manifest`, `invalid_filename`, `name_conflict`, `destination_exists`, `insufficient_storage`, `resource_limit`, and `unavailable`. Rejection ends the proposal and returns the session to idle.
+Allowed rejection reasons are `user_rejected`, `busy`, `timeout`, `invalid_manifest`, `invalid_filename`, `name_conflict`, `destination_exists`, `insufficient_storage`, `resource_limit`, and `unavailable`. Rejection ends the proposal and returns the session to idle. `destination_exists` remains defined for compatibility, but an occupied destination name no longer rejects a proposal; the recipient saves the incoming file under a local copy name.
 
 ### `ready`
 

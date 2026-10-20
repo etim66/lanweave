@@ -1,18 +1,19 @@
 //! Safe filesystem boundary for received files.
 //!
 //! Handles destination name validation, restrictive no-follow temporary file
-//! creation, and no-replace finalization. Lanweave never overwrites or
-//! silently renames a destination file.
+//! creation, and no-replace finalization. Lanweave never overwrites a
+//! destination entry: an occupied name is preserved and the incoming file is
+//! published under a numbered copy name such as `report (Copy).txt`.
 //!
 //! Creation and no-replace publication are delegated to the `tempfile` crate
 //! with a `.lanweave-*.part` name; this module keeps destination policy,
-//! streaming writes, and `StorageError` mapping.
+//! streaming writes, copy naming, and `StorageError` mapping.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 
-use crate::protocol::{FileEntry, MAX_FILES, is_valid_filename};
+use crate::protocol::{FileEntry, MAX_FILES, MAX_NAME_BYTES, is_valid_filename};
 
 /// Destination platform rules applied to every manifest name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub(crate) enum StorageError {
     InvalidName,
     /// Two names collide on the destination platform.
     NameConflict,
-    /// An entry with that name already exists.
+    /// No free copy name was available after bounded attempts.
     DestinationExists,
     /// The chosen destination root is missing or not a directory.
     InvalidDestination,
@@ -109,6 +110,91 @@ fn name_conflict(first: &str, second: &str, platform: Platform) -> bool {
     normalize(first) == normalize(second)
 }
 
+/// Suffix added to the first duplicate of a filename.
+const COPY_SUFFIX: &str = " (Copy)";
+/// Prefix of a numbered duplicate suffix, completed with `N)`.
+const COPY_NUMBER_PREFIX: &str = " (Copy ";
+/// Highest existing copy number recognized when continuing a sequence.
+const MAX_COPY_SEQUENCE: u64 = 1_000_000;
+/// Number of copy names tried before finalization gives up.
+const MAX_COPY_ATTEMPTS: u32 = 10_000;
+
+/// Splits a filename before its final extension.
+///
+/// A leading dot belongs to the stem (`.env`), and a trailing dot with nothing
+/// after it is not an extension (`report.`). This keeps copy tags before the
+/// final extension, matching the familiar `report (Copy).txt` form.
+fn split_extension(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(index) if index > 0 && index + 1 < name.len() => (&name[..index], &name[index..]),
+        _ => (name, ""),
+    }
+}
+
+/// Parses a `(Copy)` or `(Copy N)` suffix from a filename stem.
+///
+/// Only tags produced by this naming scheme are recognized. The returned count
+/// is the existing copy number, so the next candidate is `count + 1`.
+fn copy_sequence(stem: &str) -> Option<(&str, u64)> {
+    if let Some(base) = stem.strip_suffix(COPY_SUFFIX) {
+        return Some((base, 1));
+    }
+    let inner = stem.strip_suffix(')')?;
+    let (base, number) = inner.rsplit_once(COPY_NUMBER_PREFIX)?;
+    let count = number.parse::<u64>().ok()?;
+    (1..=MAX_COPY_SEQUENCE)
+        .contains(&count)
+        .then_some((base, count))
+}
+
+/// Builds the `ordinal`th copy name for `requested`, starting at ` (Copy)`.
+///
+/// Existing copy tags are continued instead of nested, so a taken
+/// `report (Copy).txt` becomes `report (Copy 2).txt`. A tag that follows the
+/// final dot (`report. (Copy)`) is recognized on the full name first so it
+/// continues rather than nesting. The result is truncated on a UTF-8 boundary
+/// to stay within [`MAX_NAME_BYTES`].
+fn copy_name(requested: &str, ordinal: u32) -> String {
+    let (base, extension, current) = if let Some((base, current)) = copy_sequence(requested) {
+        (base, "", current)
+    } else {
+        let (stem, extension) = split_extension(requested);
+        match copy_sequence(stem) {
+            Some((base, current)) => (base, extension, current),
+            None => (stem, extension, 0),
+        }
+    };
+    let count = current.saturating_add(u64::from(ordinal));
+    let tag = if count == 1 {
+        COPY_SUFFIX.to_owned()
+    } else {
+        format!("{COPY_NUMBER_PREFIX}{count})")
+    };
+
+    let reserved = tag.len() + extension.len();
+    if reserved < MAX_NAME_BYTES {
+        let base = truncate_utf8(base, MAX_NAME_BYTES - reserved);
+        format!("{base}{tag}{extension}")
+    } else {
+        // The extension cannot fit alongside the copy tag. Keep the original
+        // name intact as the stem and truncate it instead.
+        let base = truncate_utf8(requested, MAX_NAME_BYTES - tag.len());
+        format!("{base}{tag}")
+    }
+}
+
+/// Truncates UTF-8 text to at most `max` bytes without splitting a character.
+fn truncate_utf8(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// One local destination directory chosen by the recipient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Destination {
@@ -127,6 +213,10 @@ impl Destination {
     }
 
     /// Validates every manifest entry before the transfer is accepted.
+    ///
+    /// Occupied destination names are allowed; finalization chooses a copy
+    /// name. Only unsafe names and names that conflict with one another are
+    /// rejected here.
     pub(crate) fn check_manifest(&self, entries: &[FileEntry]) -> Result<(), StorageError> {
         if entries.is_empty() || entries.len() > usize::from(MAX_FILES) {
             return Err(StorageError::InvalidManifest);
@@ -141,28 +231,20 @@ impl Destination {
             {
                 return Err(StorageError::NameConflict);
             }
-            if self.exists(&entry.name) {
-                return Err(StorageError::DestinationExists);
-            }
         }
         Ok(())
     }
 
     /// Creates the restrictive partial file for one verified manifest entry.
+    ///
+    /// An occupied destination name is not refused here. Finalization keeps
+    /// the existing entry and publishes the incoming file under a copy name.
     pub(crate) async fn begin_file(
         &self,
         entry: &FileEntry,
     ) -> Result<TemporaryFile, StorageError> {
         validate_name(&entry.name, Platform::current())?;
-        if self.exists(&entry.name) {
-            return Err(StorageError::DestinationExists);
-        }
         TemporaryFile::create(&self.root, &entry.name)
-    }
-
-    /// Checks for any directory entry, following no links.
-    fn exists(&self, name: &str) -> bool {
-        std::fs::symlink_metadata(self.root.join(name)).is_ok()
     }
 }
 
@@ -171,7 +253,8 @@ impl Destination {
 pub(crate) struct TemporaryFile {
     file: tokio::fs::File,
     temp: tempfile::NamedTempFile,
-    final_path: PathBuf,
+    root: PathBuf,
+    requested_name: String,
 }
 
 impl TemporaryFile {
@@ -186,7 +269,8 @@ impl TemporaryFile {
         Ok(Self {
             file,
             temp,
-            final_path: root.join(name),
+            root: root.to_path_buf(),
+            requested_name: name.to_owned(),
         })
     }
 
@@ -199,11 +283,20 @@ impl TemporaryFile {
             .map_err(|_| StorageError::Io)
     }
 
-    /// Flushes, syncs, and publishes the file under its final name.
+    /// Flushes, syncs, and publishes the file, returning its final name.
     ///
-    /// Publication never replaces an existing destination. If an entry
-    /// appeared after the manifest check, finalization fails instead.
-    pub(crate) async fn finalize(self) -> Result<(), StorageError> {
+    /// Publication never replaces an existing destination. The requested name
+    /// is tried first; each collision advances through ` (Copy)`,
+    /// ` (Copy 2)`, and so on. A race after preparation therefore produces a
+    /// copy instead of overwriting the new entry or failing the transfer.
+    pub(crate) async fn finalize(self) -> Result<String, StorageError> {
+        self.finalize_bounded(MAX_COPY_ATTEMPTS).await
+    }
+
+    /// Publishes with at most `max_attempts` copy names after the requested
+    /// name. Split from [`Self::finalize`] so tests can exercise exhaustion
+    /// without creating thousands of destination entries.
+    async fn finalize_bounded(self, max_attempts: u32) -> Result<String, StorageError> {
         use tokio::io::AsyncWriteExt;
 
         // No custom `Drop` impl is needed: `NamedTempFile` removes the partial
@@ -211,23 +304,34 @@ impl TemporaryFile {
         // the partial back inside the error so dropping it also removes it.
         let Self {
             mut file,
-            temp,
-            final_path,
+            mut temp,
+            root,
+            requested_name,
         } = self;
         file.flush().await.map_err(|_| StorageError::Io)?;
         file.sync_all().await.map_err(|_| StorageError::Io)?;
         drop(file);
 
-        match temp.persist_noclobber(&final_path) {
-            Ok(_) => Ok(()),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(StorageError::DestinationExists)
+        for attempt in 0..=max_attempts {
+            let name = if attempt == 0 {
+                requested_name.clone()
+            } else {
+                copy_name(&requested_name, attempt)
+            };
+            let final_path = root.join(&name);
+            match temp.persist_noclobber(&final_path) {
+                Ok(_) => return Ok(name),
+                Err(error) => {
+                    let collision = error.error.kind() == std::io::ErrorKind::AlreadyExists
+                        || std::fs::symlink_metadata(&final_path).is_ok();
+                    temp = error.file;
+                    if !collision {
+                        return Err(StorageError::Io);
+                    }
+                }
             }
-            Err(_) if std::fs::symlink_metadata(&final_path).is_ok() => {
-                Err(StorageError::DestinationExists)
-            }
-            Err(_) => Err(StorageError::Io),
         }
+        Err(StorageError::DestinationExists)
     }
 }
 
@@ -236,10 +340,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Destination, Platform, StorageError, TemporaryFile, name_conflict, validate_destination,
-        validate_name,
+        COPY_SUFFIX, Destination, Platform, StorageError, TemporaryFile, copy_name, name_conflict,
+        validate_destination, validate_name,
     };
-    use crate::protocol::FileEntry;
+    use crate::protocol::{FileEntry, MAX_NAME_BYTES};
 
     fn temp_root(tag: &str) -> PathBuf {
         let root =
@@ -313,8 +417,51 @@ mod tests {
         assert!(!name_conflict("A.txt", "a.txt", Platform::Unix));
     }
 
+    #[test]
+    fn copy_names_follow_the_linux_convention() {
+        assert_eq!(copy_name("NYSC.pdf", 1), "NYSC (Copy).pdf");
+        assert_eq!(copy_name("NYSC.pdf", 2), "NYSC (Copy 2).pdf");
+        assert_eq!(copy_name("NYSC (Copy).pdf", 1), "NYSC (Copy 2).pdf");
+        assert_eq!(copy_name("NYSC (Copy 2).pdf", 1), "NYSC (Copy 3).pdf");
+        assert_eq!(copy_name("report. (Copy)", 1), "report. (Copy 2)");
+        assert_eq!(copy_name("report.txt (Copy)", 1), "report.txt (Copy 2)");
+        assert_eq!(copy_name("archive.tar.gz", 1), "archive.tar (Copy).gz");
+        assert_eq!(copy_name(".env", 1), ".env (Copy)");
+        assert_eq!(copy_name("README", 1), "README (Copy)");
+        assert_eq!(copy_name("foo.", 1), "foo. (Copy)");
+        assert_eq!(copy_name("foo...txt", 1), "foo.. (Copy).txt");
+        assert_eq!(
+            copy_name("NYSC (Copyright).pdf", 1),
+            "NYSC (Copyright) (Copy).pdf"
+        );
+    }
+
+    #[test]
+    fn copy_names_fit_the_protocol_limit() {
+        let long = format!("{}.pdf", "n".repeat(MAX_NAME_BYTES - 4));
+        assert_eq!(long.len(), MAX_NAME_BYTES);
+        let copy = copy_name(&long, 1);
+        assert!(copy.len() <= MAX_NAME_BYTES);
+        assert!(copy.ends_with(" (Copy).pdf"));
+        assert_eq!(validate_name(&copy, Platform::Unix), Ok(()));
+        assert_eq!(validate_name(&copy, Platform::Windows), Ok(()));
+
+        let unicode = format!("{}.pdf", "é".repeat(124));
+        let copy = copy_name(&unicode, 1);
+        assert!(copy.len() <= MAX_NAME_BYTES);
+        assert!(copy.ends_with(" (Copy).pdf"));
+        assert_eq!(validate_name(&copy, Platform::Unix), Ok(()));
+
+        // A huge extension cannot fit beside the tag; the name is still bounded.
+        let huge_extension = format!("a.{}", "x".repeat(MAX_NAME_BYTES - 5));
+        let copy = copy_name(&huge_extension, 1);
+        assert!(copy.len() <= MAX_NAME_BYTES);
+        assert!(copy.ends_with(COPY_SUFFIX));
+        assert_eq!(validate_name(&copy, Platform::Unix), Ok(()));
+    }
+
     #[tokio::test]
-    async fn manifest_checks_reject_conflicts_and_existing_entries() {
+    async fn manifest_checks_accept_existing_names_but_reject_conflicts() {
         let root = temp_root("check");
         let destination = Destination::new(root.clone());
 
@@ -333,52 +480,112 @@ mod tests {
         );
 
         std::fs::write(root.join("existing.txt"), b"x").unwrap();
-        assert_eq!(
-            destination.check_manifest(&[entry("existing.txt")]),
-            Err(StorageError::DestinationExists)
-        );
+        assert!(destination.check_manifest(&[entry("existing.txt")]).is_ok());
 
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(root.join("existing.txt"), root.join("link.txt")).unwrap();
-            assert_eq!(
-                destination.check_manifest(&[entry("link.txt")]),
-                Err(StorageError::DestinationExists)
-            );
+            assert!(destination.check_manifest(&[entry("link.txt")]).is_ok());
         }
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
-    async fn finalization_publishes_without_replacing() {
+    async fn finalization_uses_copy_names_without_replacing() {
         let root = temp_root("finalize");
         let destination = Destination::new(root.clone());
 
         let mut file = destination.begin_file(&entry("report.txt")).await.unwrap();
-        file.write_all(b"payload").await.unwrap();
-        file.finalize().await.unwrap();
-        assert_eq!(std::fs::read(root.join("report.txt")).unwrap(), b"payload");
+        file.write_all(b"first").await.unwrap();
+        assert_eq!(file.finalize().await.unwrap(), "report.txt");
 
-        // Preparing an existing name is refused before any bytes move.
+        let mut file = destination.begin_file(&entry("report.txt")).await.unwrap();
+        file.write_all(b"second").await.unwrap();
+        assert_eq!(file.finalize().await.unwrap(), "report (Copy).txt");
+
+        let mut file = destination.begin_file(&entry("report.txt")).await.unwrap();
+        file.write_all(b"third").await.unwrap();
+        assert_eq!(file.finalize().await.unwrap(), "report (Copy 2).txt");
+
+        assert_eq!(std::fs::read(root.join("report.txt")).unwrap(), b"first");
         assert_eq!(
-            destination
-                .begin_file(&entry("report.txt"))
-                .await
-                .unwrap_err(),
-            StorageError::DestinationExists
+            std::fs::read(root.join("report (Copy).txt")).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            std::fs::read(root.join("report (Copy 2).txt")).unwrap(),
+            b"third"
         );
 
-        // A destination that races in after preparation is never replaced.
+        // A gap is reused before a higher number.
+        std::fs::remove_file(root.join("report (Copy).txt")).unwrap();
+        let mut file = destination.begin_file(&entry("report.txt")).await.unwrap();
+        file.write_all(b"fourth").await.unwrap();
+        assert_eq!(file.finalize().await.unwrap(), "report (Copy).txt");
+        assert_eq!(
+            std::fs::read(root.join("report (Copy).txt")).unwrap(),
+            b"fourth"
+        );
+
+        assert_eq!(partial_count(&root), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn finalization_reports_exhaustion_after_the_bounded_search() {
+        let root = temp_root("exhausted");
+        std::fs::write(root.join("report.txt"), b"original").unwrap();
+        std::fs::write(root.join("report (Copy).txt"), b"first copy").unwrap();
+
+        let mut file = TemporaryFile::create(&root, "report.txt").unwrap();
+        file.write_all(b"partial").await.unwrap();
+        assert_eq!(
+            file.finalize_bounded(1).await,
+            Err(StorageError::DestinationExists)
+        );
+        assert_eq!(partial_count(&root), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_destination_created_after_preparation_receives_a_copy() {
+        let root = temp_root("race");
         let mut raced = TemporaryFile::create(&root, "raced.txt").unwrap();
         raced.write_all(b"partial").await.unwrap();
         std::fs::write(root.join("raced.txt"), b"original").unwrap();
-        assert_eq!(
-            raced.finalize().await.unwrap_err(),
-            StorageError::DestinationExists
-        );
+
+        assert_eq!(raced.finalize().await.unwrap(), "raced (Copy).txt");
         assert_eq!(std::fs::read(root.join("raced.txt")).unwrap(), b"original");
+        assert_eq!(
+            std::fs::read(root.join("raced (Copy).txt")).unwrap(),
+            b"partial"
+        );
         assert_eq!(partial_count(&root), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_symlinks_are_preserved_and_skipped() {
+        let root = temp_root("symlink");
+        let destination = Destination::new(root.clone());
+        std::fs::write(root.join("target.txt"), b"target").unwrap();
+        std::os::unix::fs::symlink(root.join("target.txt"), root.join("link.txt")).unwrap();
+
+        let mut file = destination.begin_file(&entry("link.txt")).await.unwrap();
+        file.write_all(b"incoming").await.unwrap();
+        assert_eq!(file.finalize().await.unwrap(), "link (Copy).txt");
+        assert!(
+            std::fs::symlink_metadata(root.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(root.join("link (Copy).txt")).unwrap(),
+            b"incoming"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

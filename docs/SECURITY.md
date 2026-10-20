@@ -38,7 +38,7 @@ Peer names and filenames are data, not terminal markup. The TUI and logs escape 
 
 The requester sends no filename or size before pairing. The recipient sees the complete file list before acceptance. Pairing is never automatic transfer approval.
 
-Incoming names are single filename components under a local destination. Lanweave rejects unsafe, duplicate, platform-equivalent, and existing names. It writes to restrictive temporary files and finalizes only after exact size and SHA-256 verification. It never overwrites or automatically opens a received file.
+Incoming names are single filename components under a local destination. Lanweave rejects unsafe, duplicate, and platform-equivalent names. An existing destination entry is preserved and the incoming file is published under a bounded copy name. It writes to restrictive temporary files and finalizes only after exact size and SHA-256 verification. It never overwrites or automatically opens a received file.
 
 ## Secret Handling
 

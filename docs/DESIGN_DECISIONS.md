@@ -20,4 +20,4 @@
 
 ## Deferred
 
-Directories, resume, parallel files or transfers, compression, overwrite or rename, trusted devices, algorithm negotiation, QUIC, mobile support, and graphical interfaces are outside the MVP. The TUI is required and is not deferred.
+Directories, resume, parallel files or transfers, compression, overwrite or rename negotiation, trusted devices, algorithm negotiation, QUIC, mobile support, and graphical interfaces are outside the MVP. The TUI is required and is not deferred. Automatic local copy naming for an occupied destination is part of the file pipeline, not a rename negotiation feature.

@@ -35,7 +35,7 @@ Authorization exists only in memory for the current connection. A new session al
 
 A transfer request contains an ordered list of one or more regular files. Each item contains only its filename and exact size. The recipient also sees the file count and total size calculated by the app.
 
-Files are sent one at a time. Lanweave writes incoming bytes to a temporary file, checks the size and SHA-256 digest, and then safely moves the file to its final name. It never overwrites an existing file.
+Files are sent one at a time. Lanweave writes incoming bytes to a temporary file, checks the size and SHA-256 digest, and then safely moves the file to its final name. It never overwrites an existing file. If the requested name is occupied, the existing file is kept and the incoming file is saved as `name (Copy).ext`, then `name (Copy 2).ext`, and so on.
 
 The transfer stops on the first file failure. The current partial file is deleted and files already finalized remain. Rejection before `ready` keeps the paired session open. Failure after `ready` closes it because file frames may already be in flight.
 
@@ -60,7 +60,7 @@ Pairing prompts and transfer approval prompts also have shorter local deadlines 
 
 ## Non-Goals
 
-The MVP excludes directories, resume, parallel files, compression, overwrite or rename negotiation, trusted devices, automatic acceptance, QUIC, mobile clients, and graphical interfaces. A TUI is required and is not considered a graphical interface.
+The MVP excludes directories, resume, parallel files, compression, overwrite or rename negotiation, trusted devices, automatic acceptance, QUIC, mobile clients, and graphical interfaces. Local copy naming for occupied destination names is automatic; it is not a remote rename option. A TUI is required and is not considered a graphical interface.
 
 Lanweave does not provide anonymity, protect a compromised computer, make received content safe to open, or guarantee connectivity on networks that block peer traffic.
 

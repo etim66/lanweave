@@ -103,8 +103,10 @@ impl IncomingFile {
 
     /// Verifies the exact size and digest, then publishes the file.
     ///
-    /// Dropping an unfinished or failed `IncomingFile` removes the partial.
-    pub(crate) async fn finish(self, digest: [u8; 32]) -> Result<(), FileFailure> {
+    /// Returns the actual saved filename, which may be a copy name when the
+    /// requested name was already occupied. Dropping an unfinished or failed
+    /// `IncomingFile` removes the partial.
+    pub(crate) async fn finish(self, digest: [u8; 32]) -> Result<String, FileFailure> {
         if self.written != self.expected {
             return Err(FileFailure::SizeMismatch);
         }
@@ -165,7 +167,7 @@ mod tests {
         size: u64,
         destination: &Destination,
         entry: &FileEntry,
-    ) -> Result<(), FileFailure> {
+    ) -> Result<String, FileFailure> {
         let (sender, mut receiver) = mpsc::channel(DATA_CHANNEL_CAPACITY);
         let path = source.to_owned();
         let sender_task = tokio::spawn(async move { send_file(&path, size, &sender).await });
@@ -212,6 +214,31 @@ mod tests {
                 "name: {name}"
             );
         }
+        assert_eq!(partial_count(destination.root()), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_existing_destination_is_saved_as_a_copy() {
+        let root = temp_root("copy");
+        let destination = Destination::new(root.join("out"));
+        std::fs::create_dir_all(destination.root()).unwrap();
+        std::fs::write(destination.root().join("report.txt"), b"original").unwrap();
+
+        let source = write_source(&root, "report.txt", b"incoming");
+        let saved = stream_one(&source, 8, &destination, &entry("report.txt", 8))
+            .await
+            .unwrap();
+
+        assert_eq!(saved, "report (Copy).txt");
+        assert_eq!(
+            std::fs::read(destination.root().join("report.txt")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(destination.root().join("report (Copy).txt")).unwrap(),
+            b"incoming"
+        );
         assert_eq!(partial_count(destination.root()), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
