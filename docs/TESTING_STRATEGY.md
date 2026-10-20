@@ -56,10 +56,13 @@ Tests show that the implementation follows the draft. They do not prove that una
 
 - One-file, multi-file, zero-byte, and larger-than-memory transfers succeed in order.
 - No file data is accepted before pairing, transfer acceptance, and `ready`.
-- Duplicate, equivalent, unsafe, reserved, existing, and path-like names are rejected.
+- Duplicate, equivalent, unsafe, reserved, and path-like names are rejected.
+- An occupied destination name is preserved; the incoming file gets ` (Copy)`, then ` (Copy 2)`, and so on. Existing copy sequences continue rather than nesting.
+- Copy names stay within the filename limit, including long and Unicode names.
 - Symlink races, destination creation races, source changes, disk full, write failure, wrong size, wrong hash, disconnect, and cancellation clean partial files.
 - A later-file failure keeps exactly the verified prefix and starts no later file.
 - Received files are never overwritten, opened, previewed, or executed automatically.
+- The recipient summary shows the actual saved copy names.
 
 ## Property And Fuzz Tests
 

@@ -248,8 +248,9 @@ pub(crate) enum TransferDirection {
 
 /// The result of one finished transfer, shown to both participants.
 ///
-/// The summary never contains local source paths; only wire manifest names and
-/// the recipient's chosen destination.
+/// The summary never contains local source paths. Sent files use the wire
+/// manifest names; received files use their actual saved names, which may be
+/// local copy names chosen when a destination entry already existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransferSummary {
     pub(crate) direction: TransferDirection,

@@ -88,11 +88,10 @@ A request MUST contain 1 through 1,024 regular files. Every entry contains only 
 
 - a field exceeds a fixed limit;
 - a name is invalid, path-like, duplicate, or equivalent on the destination platform;
-- a destination already exists;
 - checked size, storage, or resource policy fails; or
 - the user rejects the request.
 
-The recipient MUST NOT accept a subset, alter order, rename a file, or overwrite an existing destination.
+An occupied destination name does not reject the request. The recipient MUST NOT accept a subset, alter order, alter the wire manifest, or overwrite an existing destination. It MAY publish an entry under a local copy name such as `name (Copy).ext` when the requested name is occupied; this local name is not sent on the wire.
 
 ## Streaming
 
@@ -140,4 +139,4 @@ These outcomes clean the current transfer and close the session:
 
 ## Deferred
 
-Directories, resume, parallel files or transfers, overwrite or rename, compression, chunk acknowledgements, application flow windows, capability negotiation, algorithm negotiation, persistent identity, trusted devices, and automatic reconnect are deferred.
+Directories, resume, parallel files or transfers, overwrite or rename negotiation, compression, chunk acknowledgements, application flow windows, capability negotiation, algorithm negotiation, persistent identity, trusted devices, and automatic reconnect are deferred.

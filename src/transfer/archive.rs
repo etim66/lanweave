@@ -181,7 +181,14 @@ mod tests {
         let file = std::fs::File::open(&destination).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .map(|index| {
+                archive
+                    .by_index(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned()
+            })
             .collect();
 
         assert!(names.contains(&"one.txt".to_owned()));
@@ -200,7 +207,14 @@ mod tests {
             let file = std::fs::File::open(&second).unwrap();
             let mut archive = zip::ZipArchive::new(file).unwrap();
             let names: Vec<String> = (0..archive.len())
-                .map(|index| archive.by_index(index).unwrap().name().to_owned())
+                .map(|index| {
+                    archive
+                        .by_index(index)
+                        .unwrap()
+                        .name()
+                        .unwrap()
+                        .into_owned()
+                })
                 .collect();
             assert!(!names.iter().any(|name| name.starts_with("link")));
         }

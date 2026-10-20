@@ -13,8 +13,8 @@
 //! both ends, and no key logging is configured. Each handshake yields a fresh
 //! 32-byte RFC 5705 exporter that pairing later binds to.
 //!
-//! The `tls12` compile feature is not enabled, so TLS 1.2 is unsupported at
-//! compile time in addition to the per-config version restriction.
+//! Both configs restrict the protocol versions to TLS 1.3, so TLS 1.2 is
+//! never negotiated; the verifier's TLS 1.2 path also fails closed.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::net::SocketAddr;
@@ -231,8 +231,8 @@ impl ServerCertVerifier for ProvisionalServerVerifier {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        // TLS 1.2 is disabled at compile time and in the configured versions,
-        // so this method is never called. Fail closed if it somehow is.
+        // TLS 1.2 is not in the configured protocol versions, so this method
+        // is never reached on a negotiated handshake. Fail closed anyway.
         Err(TlsError::General("TLS 1.2 is not supported".to_owned()))
     }
 

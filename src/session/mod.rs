@@ -1324,18 +1324,19 @@ fn cancelled_sent_summary(
     .cancelled(session_closed)
 }
 
-/// Builds a cancelled inbound summary for the first `completed` entries.
+/// Builds a cancelled inbound summary for the verified files.
+///
+/// `files` carries the actual saved names, which may be copy names chosen at
+/// finalization.
 fn cancelled_received_summary(
     connection: &SessionConnection,
-    request: &TransferRequest,
+    files: &[FileEntry],
     destination: &Destination,
-    completed: usize,
     duration: Duration,
 ) -> TransferSummary {
-    let files = request.files[..completed.min(request.files.len())].to_vec();
     TransferSummary::new(
         TransferDirection::Received,
-        files,
+        files.to_vec(),
         Some(destination.root().to_path_buf()),
         connection.peer_name.clone(),
         duration,
@@ -1686,6 +1687,9 @@ const fn rejection_for(error: StorageError) -> TransferRejection {
         StorageError::InvalidManifest => TransferRejection::InvalidManifest,
         StorageError::InvalidName => TransferRejection::InvalidFilename,
         StorageError::NameConflict => TransferRejection::NameConflict,
+        // Preflight no longer produces this error; finalization exhaustion is
+        // mapped to `FileFailure::DestinationExists` instead. Retained so an
+        // occupied name still maps cleanly if the preflight policy changes.
         StorageError::DestinationExists => TransferRejection::DestinationExists,
         StorageError::InvalidDestination | StorageError::Io => TransferRejection::Unavailable,
     }
@@ -1930,6 +1934,7 @@ async fn run_receiving(
     let _ = events.send(AppEvent::TransferStarted).await;
     tracker.begin_file(0, sizes[0]);
     emit_progress(events, &mut tracker, true);
+    let mut verified = Vec::with_capacity(request.files.len());
     let mut index = 0u16;
     let mut deadline = Instant::now() + timeouts.progress;
     loop {
@@ -1949,9 +1954,8 @@ async fn run_receiving(
                     let _ = events
                         .send(AppEvent::TransferCompleted(cancelled_received_summary(
                             connection,
-                            &request,
+                            &verified,
                             &destination,
-                            usize::from(index),
                             tracker.elapsed(),
                         )))
                         .await;
@@ -1985,7 +1989,10 @@ async fn run_receiving(
                                 return Err(FlowOutcome::Failed);
                             }
                             match incoming.finish(file_end.sha256).await {
-                                Ok(()) => {
+                                Ok(saved_name) => {
+                                    let mut saved = request.files[usize::from(index)].clone();
+                                    saved.name = saved_name;
+                                    verified.push(saved);
                                     let actions = connection
                                         .send_control(&Control::FileResult(
                                             FileResult::verified(index),
@@ -1998,7 +2005,7 @@ async fn run_receiving(
                                             .send(AppEvent::TransferCompleted(
                                                 TransferSummary::new(
                                                     TransferDirection::Received,
-                                                    request.files.clone(),
+                                                    verified.clone(),
                                                     Some(destination.root().to_path_buf()),
                                                     connection.peer_name.clone(),
                                                     tracker.elapsed(),
@@ -2035,9 +2042,8 @@ async fn run_receiving(
                             let _ = events
                                 .send(AppEvent::TransferCompleted(cancelled_received_summary(
                                     connection,
-                                    &request,
+                                    &verified,
                                     &destination,
-                                    usize::from(index),
                                     tracker.elapsed(),
                                 )))
                                 .await;
@@ -2051,9 +2057,8 @@ async fn run_receiving(
                         let _ = events
                             .send(AppEvent::TransferCompleted(cancelled_received_summary(
                                 connection,
-                                &request,
+                                &verified,
                                 &destination,
-                                usize::from(index),
                                 tracker.elapsed(),
                             )))
                             .await;
@@ -2199,9 +2204,9 @@ mod tests {
     use crate::framing::Frame;
     use crate::pairing::PairingCode;
     use crate::protocol::{
-        CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEntry, Hello, PairRejection,
-        PairingRecord, PairingStep, Phase, TransferCancel, TransferRejection, TransferRequest,
-        TransferResponse,
+        CancelCode, CloseCode, Control, ErrorCode, ErrorMessage, FileEnd, FileEntry, Hello,
+        PairRejection, PairingRecord, PairingStep, Phase, TransferCancel, TransferRejection,
+        TransferRequest, TransferResponse,
     };
     use crate::transfer::selection::FileSelection;
     use crate::transport::{FramedConnection, Outbound, TlsHandshake};
@@ -2899,7 +2904,14 @@ mod tests {
         let file = std::fs::File::open(&received).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut names: Vec<String> = (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .map(|index| {
+                archive
+                    .by_index(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned()
+            })
             .collect();
         names.sort();
         assert_eq!(names, ["nested/", "nested/two.txt", "one.txt"]);
@@ -2959,6 +2971,183 @@ mod tests {
         ] {
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[tokio::test]
+    async fn existing_destination_names_are_saved_as_numbered_copies() {
+        let source = temp_root("copy-source");
+        let destination = temp_root("copy-destination");
+        let report = source.join("NYSC.pdf");
+        std::fs::write(&report, b"incoming").unwrap();
+        std::fs::write(destination.join("NYSC.pdf"), b"original").unwrap();
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let (initiator, mut initiator_events) = initiator_under_test(test_timeouts()).await;
+        pair_services(
+            &initiator,
+            &mut initiator_events,
+            &responder,
+            &mut responder_events,
+            address,
+        )
+        .await;
+
+        for copy in ["NYSC (Copy).pdf", "NYSC (Copy 2).pdf"] {
+            initiator
+                .send(SessionCommand::StartTransfer(selection(&[&report])))
+                .await
+                .unwrap();
+            assert_eq!(
+                next_proposal(&mut responder_events).await,
+                [("NYSC.pdf".to_owned(), 8)]
+            );
+            responder
+                .send(SessionCommand::AcceptTransfer(destination.clone()))
+                .await
+                .unwrap();
+            wait_started(&mut initiator_events).await;
+            wait_started(&mut responder_events).await;
+
+            let sent = wait_finished(&mut initiator_events).await;
+            let received = wait_finished(&mut responder_events).await;
+            assert_eq!(
+                sent.files
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["NYSC.pdf"]
+            );
+            assert_eq!(
+                received
+                    .files
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>(),
+                [copy]
+            );
+            assert_eq!(std::fs::read(destination.join(copy)).unwrap(), b"incoming");
+            assert_eq!(
+                std::fs::read(destination.join("NYSC.pdf")).unwrap(),
+                b"original"
+            );
+        }
+
+        responder.stop().await;
+        initiator.stop().await;
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_received_summary_shows_the_saved_copy_name() {
+        use sha2::{Digest, Sha256};
+
+        let destination = temp_root("copy-cancel-destination");
+        std::fs::write(destination.join("NYSC.pdf"), b"original").unwrap();
+
+        let (responder, mut responder_events, address) =
+            responder_under_test(test_timeouts()).await;
+        let handshake = crate::transport::connect(address, test_timeouts().handshake)
+            .await
+            .unwrap();
+        let (mut peer, outbound) =
+            pair_raw_initiator(handshake, &responder, &mut responder_events).await;
+
+        outbound
+            .send_control(&Control::TransferRequest(
+                TransferRequest::new(vec![
+                    FileEntry::new("NYSC.pdf".to_owned(), 8),
+                    FileEntry::new("second.bin".to_owned(), 64),
+                ])
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::IncomingTransferRequest(_)
+            ))
+            .await,
+            AppEvent::IncomingTransferRequest(_)
+        ));
+        responder
+            .send(SessionCommand::AcceptTransfer(destination.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::TransferResponse(response) if response.accepted
+        ));
+        assert!(matches!(raw_control(&mut peer).await, Control::Ready));
+        wait_started(&mut responder_events).await;
+
+        // The first file finalizes under a copy name and is reported verified.
+        outbound
+            .send_data(Bytes::from_static(b"incoming"))
+            .await
+            .unwrap();
+        outbound
+            .send_control(&Control::FileEnd(FileEnd {
+                index: 0,
+                sha256: Sha256::digest(b"incoming").into(),
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            raw_control(&mut peer).await,
+            Control::FileResult(result) if result.index == 0
+        ));
+
+        // The peer cancels while the second file waits for data. The summary
+        // must name the first file by the name actually saved on disk.
+        outbound
+            .send_control(&Control::TransferCancel(TransferCancel {
+                code: CancelCode::UserCancelled,
+            }))
+            .await
+            .unwrap();
+
+        let AppEvent::TransferCompleted(summary) = next_matching(&mut responder_events, |event| {
+            matches!(event, AppEvent::TransferCompleted(_))
+        })
+        .await
+        else {
+            unreachable!("the predicate only matches summaries");
+        };
+        assert!(summary.cancelled);
+        assert!(summary.session_closed);
+        assert_eq!(
+            summary
+                .files
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["NYSC (Copy).pdf"]
+        );
+
+        // The second partial is removed when the session closes.
+        assert!(matches!(
+            next_matching(&mut responder_events, |event| matches!(
+                event,
+                AppEvent::SessionClosed
+            ))
+            .await,
+            AppEvent::SessionClosed
+        ));
+        assert_eq!(
+            std::fs::read(destination.join("NYSC (Copy).pdf")).unwrap(),
+            b"incoming"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("NYSC.pdf")).unwrap(),
+            b"original"
+        );
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 2);
+
+        responder.stop().await;
+        let _ = std::fs::remove_dir_all(&destination);
     }
 
     #[tokio::test]

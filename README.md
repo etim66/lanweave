@@ -90,7 +90,7 @@ The first release will support:
 - transfer requests in either direction during a session;
 - separate approval for pairing and for every transfer;
 - encrypted TCP/TLS transport with code-based peer authorization;
-- safe filenames, no overwrite, bounded memory use, and partial-file cleanup;
+- safe filenames, no overwrite, numbered copies for occupied names, bounded memory use, and partial-file cleanup;
 - manual session close and a maximum 10-minute idle period; and
 - no accounts, cloud service, background daemon, or trusted devices.
 

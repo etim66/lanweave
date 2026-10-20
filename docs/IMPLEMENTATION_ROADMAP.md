@@ -64,10 +64,10 @@ Exit criteria:
 
 - Multi-file transfers work without loading whole files into memory.
 - The recipient approves the complete metadata list before data.
-- Unsafe or existing names never overwrite a destination.
+- Unsafe names are rejected, and existing destination names are never overwritten; incoming files receive bounded copy names.
 - A later-file failure keeps the verified prefix and removes the current partial.
 
-Status: implemented. `transfer::selection` parses, validates, and reduces pasted paths to a names-and-sizes manifest with folder archives; `transfer::archive` streams bounded zip preparation to a temporary file; `storage` validates destination names and manages restrictive no-replace partial files; `transfer::engine` streams bounded chunks with SHA-256 verification and fail-fast prefix retention; and the session owner runs the separately approved `transfer_request`, `ready`, `DATA`, `file_end`, and `file_result` exchange over the authorized connection, with throttled progress, local cancellation, and completion summaries. The recipient chooses the destination directory in the review prompt.
+Status: implemented. `transfer::selection` parses, validates, and reduces pasted paths to a names-and-sizes manifest with folder archives; `transfer::archive` streams bounded zip preparation to a temporary file; `storage` validates destination names, manages restrictive no-replace partial files, and publishes occupied names under bounded copy names; `transfer::engine` streams bounded chunks with SHA-256 verification and fail-fast prefix retention; and the session owner runs the separately approved `transfer_request`, `ready`, `DATA`, `file_end`, and `file_result` exchange over the authorized connection, with throttled progress, local cancellation, and completion summaries. The recipient chooses the destination directory in the review prompt.
 
 ## Gate 6: Reusable Sessions
 

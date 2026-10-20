@@ -33,7 +33,7 @@ Authentication failure closes the connection and clears code and pairing state. 
 | `invalid_manifest` | Count, size, or total is invalid. |
 | `invalid_filename` | A filename is unsafe for the destination. |
 | `name_conflict` | Requested names conflict with one another. |
-| `destination_exists` | A destination already exists. |
+| `destination_exists` | Reserved for compatibility; an occupied destination name no longer rejects a proposal. |
 | `insufficient_storage` | Storage policy cannot accept the request. |
 | `resource_limit` | A bounded local policy rejected the request. |
 | `unavailable` | The recipient cannot accept now. |
@@ -49,7 +49,7 @@ No file data follows rejection. Both peers return to session idle and restart th
 | `size_mismatch` | Received bytes do not match the declared size. |
 | `hash_mismatch` | The calculated SHA-256 does not match. |
 | `write_failed` | Writing or finalizing failed. |
-| `destination_exists` | A destination appeared after preflight. |
+| `destination_exists` | No free copy name was available within the bounded finalization search. |
 | `insufficient_storage` | Storage became unavailable. |
 
 The recipient deletes the current partial file, keeps the verified prefix, and does not attempt later files. The peers then close the session because file frames may already be in flight. A future transfer requires fresh pairing.

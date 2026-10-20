@@ -21,7 +21,7 @@ An authorized session is required before file metadata is sent. The requester se
 - checked total size; and
 - the requesting peer's untrusted display name.
 
-The recipient accepts or rejects the whole list. There is no partial approval, remote rename, or overwrite option. A rejection returns both peers to session idle. Long manifests scroll with the arrow keys, PageUp/PageDown, and Home/End, so every entry can be reviewed before the decision.
+The recipient accepts or rejects the whole list. There is no partial approval, remote rename, or overwrite option. An occupied local destination name is kept and the incoming file is saved under an automatic copy name, which the recipient sees in the completed or cancelled summary. A rejection returns both peers to session idle. Long manifests scroll with the arrow keys, PageUp/PageDown, and Home/End, so every entry can be reviewed before the decision.
 
 ## Manifest
 
@@ -41,13 +41,14 @@ Before acceptance, the recipient rejects the request if any name:
 
 - is empty, dot-like, absolute, or path-like;
 - contains a separator, NUL, or forbidden control character;
-- is invalid or reserved on the destination platform;
-- is equal or platform-equivalent to another requested name; or
-- matches an existing destination entry.
+- is invalid or reserved on the destination platform; or
+- is equal or platform-equivalent to another requested name.
+
+An existing destination entry does not reject the request. If the requested name is occupied, the recipient keeps the existing entry and publishes the incoming file as `name (Copy).ext`, then `name (Copy 2).ext`, and so on. A name that already ends in ` (Copy)` or ` (Copy N)` continues that sequence. The search is bounded, and the actual saved name is shown in the recipient's completed or cancelled summary. Copy names stay local: the sender's summary continues to show the manifest names.
 
 After user approval and before sending acceptance, the recipient selects the destination and prepares a temporary file for the first item. The review prompt lets the recipient choose any existing directory; it is prefilled with the directory where Lanweave was started or the last destination they accepted. The peer never influences or learns the destination. Temporary names are unpredictable, created without following links, and use restrictive permissions. Failure during preparation sends a rejection.
 
-Lanweave never overwrites or silently renames a destination. Finalization uses a safe no-replace operation. If that cannot be guaranteed, the file fails.
+Lanweave never overwrites a destination entry. Finalization uses a safe no-replace operation, so a file that races into the chosen name is kept and the incoming file advances to the next copy name. If finalization cannot be guaranteed, the file fails.
 
 ## Sending Data
 
@@ -64,7 +65,7 @@ TCP/TLS provides reliable ordered bytes and backpressure. Lanweave still bounds 
 
 ## Verification
 
-The recipient checks the exact byte count and SHA-256 digest before finalizing. A verified result is sent only after the file has its final no-overwrite name.
+The recipient checks the exact byte count and SHA-256 digest before finalizing. A verified result is sent only after the file has its final no-replace name, which may be a copy name.
 
 After the final verified result, the transfer is complete and the session returns to idle. Either participant may then propose another transfer.
 
@@ -97,4 +98,4 @@ The active transfer list follows the file in flight, so the current entry stays 
 
 ## Deferred
 
-Resume, sparse files, paths, extra metadata beyond folder hints, chunk acknowledgements, overwrite, rename, parallel files, and concurrent transfers are not part of version 1.
+Resume, sparse files, paths, extra metadata beyond folder hints, chunk acknowledgements, overwrite, rename negotiation, parallel files, and concurrent transfers are not part of version 1.
