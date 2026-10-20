@@ -78,7 +78,17 @@ pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, 
     }
 
     y += 1;
-    let button_rows = u16::from(inner.height >= 6);
+    let show_button = inner.height >= 6;
+    let button_margin = if inner.height >= 8 {
+        dialog::BUTTON_MARGIN
+    } else {
+        0
+    };
+    let button_rows = if show_button {
+        1 + button_margin.saturating_mul(2)
+    } else {
+        0
+    };
     let capacity = (inner.y + inner.height)
         .saturating_sub(y)
         .saturating_sub(button_rows);
@@ -99,9 +109,10 @@ pub(super) fn render_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel, 
         cursor,
     );
     if button_rows > 0 {
+        let button_y = inner.y + inner.height - 1 - button_margin;
         dialog::render_buttons(
             frame,
-            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            Rect::new(inner.x, button_y, inner.width, 1),
             &[Button::new("Cancel transfer", true)],
         );
     }
@@ -164,8 +175,17 @@ pub(super) fn render_summary_panel(
         Line::styled(detail, Style::new().fg(MUTED)),
     );
 
-    // Reserve the Done button, destination, and session-note rows at the bottom.
-    let reserved = u16::from(summary.destination.is_some()) + u16::from(summary.session_closed) + 1;
+    // Reserve the Done button, its surrounding blank rows, destination, and
+    // session-note rows at the bottom.
+    let button_margin = if inner.height >= 8 {
+        dialog::BUTTON_MARGIN
+    } else {
+        0
+    };
+    let reserved = u16::from(summary.destination.is_some())
+        + u16::from(summary.session_closed)
+        + 1
+        + button_margin.saturating_mul(2);
     let list_start = inner.y.saturating_add(3);
     let list_end = (inner.y + inner.height)
         .saturating_sub(reserved)
@@ -224,13 +244,18 @@ pub(super) fn render_summary_panel(
     }
 
     let bottom = inner.y + inner.height;
-    // The Done button always owns the last card row.
+    let last_row = bottom.saturating_sub(1);
+    let button_y = last_row
+        .saturating_sub(button_margin)
+        .max(inner.y.saturating_add(1))
+        .min(last_row);
+    // The Done button owns the row above the bottom margin.
     dialog::render_buttons(
         frame,
-        Rect::new(inner.x, bottom.saturating_sub(1), inner.width, 1),
+        Rect::new(inner.x, button_y, inner.width, 1),
         &[Button::new("Done", true)],
     );
-    let mut footer_y = bottom.saturating_sub(1);
+    let mut footer_y = button_y.saturating_sub(button_margin);
     if summary.session_closed {
         footer_y = footer_y.saturating_sub(1);
         render_panel_line(

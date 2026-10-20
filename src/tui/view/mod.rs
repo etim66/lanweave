@@ -273,6 +273,7 @@ mod tests {
         assert!(output.contains("v0.2.0 is available"));
         assert!(output.contains("Update"));
         assert!(output.contains("Cancel"));
+        assert_button_margins(&output, "The new version runs after a restart.", "Cancel");
 
         // A live session is warned that the restart will end it.
         let session = AppModel::for_test(AppState::SessionIdle);
@@ -355,6 +356,7 @@ mod tests {
         assert!(output.contains("Accept"));
         assert!(output.contains("Reject"));
         assert!(output.contains("left/right"));
+        assert_button_margins(&output, "Only accept", "Reject");
         assert!(!render_with_ui(&prompt, &ui, 20, 4).is_empty());
 
         // The responder displays the code grouped in the large digit font.
@@ -369,6 +371,11 @@ mod tests {
         assert!(output.contains("Give this code to the sender to authorize the session."));
         assert!(!output.contains("Type this code on the other device."));
         assert!(output.contains('█'));
+        assert_button_margins(
+            &output,
+            "It expires after about two minutes",
+            "Cancel pairing",
+        );
 
         // The initiator's code entry opens with the accepted response.
         let mut entry = browsing_with(&["peer"]);
@@ -460,6 +467,11 @@ mod tests {
         assert!(output.contains("Waiting for response"));
         assert!(output.contains("Cancel request"));
         assert!(!output.contains("127.0.0.1:4242"), "the address is noise");
+        assert_button_margins(
+            &output,
+            "Waiting for the other device to respond.",
+            "Cancel request",
+        );
 
         let output = render_to_string(&AppModel::for_test(AppState::OutboundProposal), 80, 24);
         assert!(output.contains("Cancel transfer"));
@@ -584,6 +596,7 @@ mod tests {
         assert!(output.contains("2.0 KiB"));
         assert!(output.contains("From peer"));
         assert!(output.contains("Save to:"));
+        assert_button_margins(&output, "Save to:", "Reject");
 
         // Tiny terminals fall back to a single count line.
         let tiny = render_with_ui(&model, &ui, 30, 4);
@@ -605,6 +618,7 @@ mod tests {
         let tall = render_with_ui(&model, &error_ui, 80, 10);
         assert!(tall.contains("Enter an existing directory"));
         assert!(tall.contains("Save to:"));
+        assert_button_margins(&tall, "Enter an existing directory", "Accept");
     }
 
     #[test]
@@ -700,6 +714,7 @@ mod tests {
         assert!(output.contains("report.txt"));
         assert!(output.contains("video.mp4"));
         assert!(output.contains('█'));
+        assert_button_margins(&output, "video.mp4", "Cancel transfer");
 
         let mut receiving = AppModel::for_test(AppState::SessionIdle);
         update(
@@ -744,6 +759,7 @@ mod tests {
         assert!(output.contains("report.txt"));
         assert!(output.contains("Saved to: /incoming"));
         assert!(output.contains("enter"));
+        assert_button_margins(&output, "Saved to: /incoming", "Done");
     }
 
     #[test]
@@ -867,6 +883,34 @@ mod tests {
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {
         render_with_ui(model, &UiState::default(), width, height)
+    }
+
+    /// Asserts blank rows above and below the focused action row, with
+    /// `content` appearing somewhere before the button.
+    fn assert_button_margins(output: &str, content: &str, button: &str) {
+        let lines: Vec<&str> = output.lines().collect();
+        let content_y = lines
+            .iter()
+            .position(|line| line.contains(content))
+            .unwrap_or_else(|| panic!("missing content `{content}`: {output}"));
+        let button_y = lines
+            .iter()
+            .position(|line| line.contains(button))
+            .unwrap_or_else(|| panic!("missing button `{button}`: {output}"));
+
+        assert!(
+            button_y > content_y + 1,
+            "a blank row must separate content from the button: {output}"
+        );
+        assert!(
+            lines[button_y - 1].trim().is_empty(),
+            "the row above the button must be blank: {output}"
+        );
+        let below = lines.get(button_y + 1).map_or("", |line| line.trim());
+        assert!(
+            below.is_empty(),
+            "the row below the button must be blank: {output}"
+        );
     }
 
     fn render_with_ui(model: &AppModel, ui: &UiState, width: u16, height: u16) -> String {
