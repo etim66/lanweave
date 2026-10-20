@@ -77,20 +77,25 @@ pub(super) fn render(
 fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &TransferReviewInput) {
     let mut y = inner.y;
     let bottom = inner.y + inner.height;
-    let buttons_y = bottom.saturating_sub(1);
+    let bottom_margin = u16::from(inner.height >= 4).min(dialog::BUTTON_MARGIN);
+    let buttons_y = bottom.saturating_sub(1 + bottom_margin);
+    let content_bottom = buttons_y.saturating_sub(1);
     // An error replaces the destination line when the card is short, but keeps
-    // its own row above the destination when there is room.
+    // its own row above the destination when there is room. The last content
+    // row stays one blank row above the buttons whenever space allows.
     let error_rows = u16::from(input.error.is_some());
     let (error_y, destination_y) = match (error_rows, inner.height) {
-        (1, height) if height >= 4 => (Some(bottom - 2), Some(bottom - 3)),
-        (1, _) => (Some(bottom.saturating_sub(2)), None),
-        (_, height) if height >= 2 => (None, Some(bottom - 2)),
+        (1, height) if height >= 6 => (Some(content_bottom - 1), Some(content_bottom - 2)),
+        (1, height) if height >= 5 => (Some(content_bottom - 1), None),
+        (1, height) if height >= 3 => (Some(content_bottom), None),
+        (_, height) if height >= 5 => (None, Some(content_bottom - 1)),
+        (_, height) if height >= 3 => (None, Some(content_bottom)),
         _ => (None, None),
     };
     let list_end = error_y
         .or(destination_y)
-        .unwrap_or(buttons_y)
-        .min(buttons_y);
+        .unwrap_or(content_bottom)
+        .min(content_bottom);
 
     let title = match model.transfer_proposal() {
         Some(proposal) => format!(

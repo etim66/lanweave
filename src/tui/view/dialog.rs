@@ -8,6 +8,10 @@ use super::layout::{centered_rect, inset_surface, surface_width};
 use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, HIGHLIGHT, MUTED, SURFACE, TEXT};
 
+/// Blank rows kept between panel content and its action row, and between the
+/// action row and the panel edge.
+pub(super) const BUTTON_MARGIN: u16 = 1;
+
 /// One selectable action in a dialog or action bar.
 ///
 /// The focused button is the one Enter activates; the user moves between
@@ -66,9 +70,9 @@ pub(super) fn buttons_line(buttons: &[Button]) -> Line<'static> {
 
 /// Renders a centered modal card with a title, body, buttons, and hints.
 ///
-/// The card is sized to its content and clamped to `area`. The focused button
-/// sits on the last card row; `hints` are rendered below the card when the
-/// terminal is tall enough.
+/// The card is sized to its content and clamped to `area`. Blank rows separate
+/// the body and the card edge from the button row, and `hints` are rendered
+/// below the card when the terminal is tall enough.
 pub(super) fn render_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -84,8 +88,12 @@ pub(super) fn render_dialog(
     }
 
     let body_rows = u16::try_from(body.len()).unwrap_or(u16::MAX);
-    // Title, a blank row, the body, a blank row, and the button row.
-    let desired = body_rows.saturating_add(4).max(6);
+    // Top padding, title, a blank row, the body, a blank row, the button row,
+    // and a bottom margin row.
+    let desired = body_rows
+        .saturating_add(4)
+        .saturating_add(BUTTON_MARGIN.saturating_mul(2))
+        .max(6);
     let hint_rows = if hints.is_some() { 2 } else { 0 };
     let stack = centered_rect(area, surface_width(area), desired.saturating_add(hint_rows));
     let card = Rect::new(
@@ -111,7 +119,11 @@ pub(super) fn render_dialog(
         ),
     );
 
-    let button_y = inner.y + inner.height - 1;
+    let last_row = inner.y + inner.height - 1;
+    let button_y = last_row
+        .saturating_sub(BUTTON_MARGIN)
+        .max(inner.y.saturating_add(1))
+        .min(last_row);
     for (y, line) in (inner.y.saturating_add(2)..button_y).zip(body) {
         render_panel_line(frame, Rect::new(inner.x, y, inner.width, 1), line);
     }

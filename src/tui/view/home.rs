@@ -88,7 +88,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel, ui: &U
     let panel_height = if browsing || transfer || code_screen {
         available_height.saturating_sub(if compact { 1 } else { 2 })
     } else {
-        (if compact { 3 } else { 5 }).min(available_height)
+        (if compact { 3 } else { 6 }).min(available_height)
     };
     if panel_height > 0 {
         render_state_surface(
@@ -289,12 +289,14 @@ fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel
         }
     }
 
-    // The bottom rows carry the sharing note and the cancel button.
-    let button_y = inner.y + inner.height - 1;
-    if inner.height >= 10 {
+    // The bottom rows carry the sharing note and the cancel button, with blank
+    // rows between the note, the button, and the panel edge.
+    let button_margin = u16::from(inner.height >= 10).min(dialog::BUTTON_MARGIN);
+    let button_y = inner.y + inner.height - 1 - button_margin;
+    if inner.height >= 12 {
         render_panel_line(
             frame,
-            Rect::new(inner.x, button_y - 2, inner.width, 1),
+            Rect::new(inner.x, button_y - 3, inner.width, 1),
             Line::styled(
                 "Give this code to the sender to authorize the session.",
                 Style::new().fg(TEXT),
@@ -302,14 +304,14 @@ fn render_pairing_code_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel
         );
         render_panel_line(
             frame,
-            Rect::new(inner.x, button_y - 1, inner.width, 1),
+            Rect::new(inner.x, button_y - 2, inner.width, 1),
             Line::styled(
                 "It expires after about two minutes and is never sent over the connection.",
                 Style::new().fg(MUTED),
             ),
         );
     }
-    if inner.height >= 8 {
+    if inner.height >= 10 {
         dialog::render_buttons(
             frame,
             Rect::new(inner.x, button_y, inner.width, 1),
@@ -332,8 +334,13 @@ fn render_message_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     }
 
     let action = action_label(model.state());
-    let button_rows = if action.is_some() && inner.height >= 4 {
-        2
+    let button_margin = if inner.height >= 5 {
+        dialog::BUTTON_MARGIN
+    } else {
+        0
+    };
+    let button_rows = if action.is_some() {
+        1 + button_margin.saturating_mul(2)
     } else {
         0
     };
@@ -355,9 +362,10 @@ fn render_message_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 
     if let (Some(label), true) = (action, button_rows > 0) {
+        let button_y = inner.y + inner.height - 1 - button_margin;
         dialog::render_buttons(
             frame,
-            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            Rect::new(inner.x, button_y, inner.width, 1),
             &[Button::new(label, true)],
         );
     }
