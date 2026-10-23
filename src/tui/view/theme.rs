@@ -4,6 +4,10 @@ use ratatui::style::Color;
 pub(super) const BACKGROUND: Color = Color::Rgb(8, 8, 8);
 /// Surface color for cards and panels.
 pub(super) const SURFACE: Color = Color::Rgb(30, 30, 30);
+/// Darker surface for a dialog's footer bar.
+pub(super) const SURFACE_FOOTER: Color = Color::Rgb(22, 22, 22);
+/// Border color for modal cards.
+pub(super) const BORDER: Color = Color::Rgb(64, 64, 64);
 /// Primary foreground text color.
 pub(super) const TEXT: Color = Color::Rgb(220, 220, 220);
 /// Secondary text color for hints and metadata.

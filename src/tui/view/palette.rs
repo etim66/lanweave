@@ -2,18 +2,17 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::command_palette::{CommandAvailability, CommandSpec, visible_commands};
 use crate::app::interaction::CommandPalette;
 use crate::app::model::AppModel;
 
-use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
-use super::presenter::status_text;
-use super::render_focus_rail;
+use super::dialog;
+use super::layout::scroll_window;
 use super::theme::{ACCENT, BACKGROUND, HIGHLIGHT, MUTED, SURFACE, TEXT};
 
-/// Renders the command palette card with filtered rows, query, and hints.
+/// Renders the command palette with filtered rows and the live query.
 ///
 /// Falls back to the raw query line on very small terminals.
 pub(super) fn render(
@@ -22,7 +21,7 @@ pub(super) fn render(
     model: &AppModel,
     palette: &CommandPalette,
 ) {
-    if area.width < 8 || area.height < 3 {
+    if area.width < 12 || area.height < 5 {
         frame.render_widget(
             Paragraph::new(format!("/{}", palette.query))
                 .alignment(Alignment::Center)
@@ -33,71 +32,83 @@ pub(super) fn render(
     }
 
     let commands = visible_commands(model.capabilities(), &palette.query);
-    let result_rows = u16::try_from(commands.len().max(1)).unwrap_or(u16::MAX);
-    let desired_card_height = result_rows.saturating_add(3);
-    let desired_stack_height = desired_card_height.saturating_add(2);
-    let stack = centered_rect(area, surface_width(area), desired_stack_height);
-    let show_hints = stack.height >= 5;
-    let card_height = stack.height.saturating_sub(if show_hints { 2 } else { 0 });
-    let card = Rect::new(stack.x, stack.y, stack.width, card_height);
-    frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), card);
+    let visible_rows = u16::try_from(commands.len().clamp(1, 10)).unwrap_or(1);
+    let hints = Line::from(vec![
+        Span::styled("up/down", Style::new().fg(TEXT)),
+        Span::styled(" select   ", Style::new().fg(MUTED)),
+        Span::styled("enter", Style::new().fg(TEXT)),
+        Span::styled(" run", Style::new().fg(MUTED)),
+    ]);
 
-    let query_height = 3.min(card.height);
-    let command_capacity = card.height.saturating_sub(query_height);
-    render_rows(frame, card, command_capacity, model, palette, &commands);
-
-    let query_area = Rect::new(
-        card.x,
-        card.y.saturating_add(command_capacity),
-        card.width,
-        query_height,
+    let spec = dialog::DialogSpec::new("Commands", ACCENT)
+        .header_hint("esc")
+        .footer_hint(hints);
+    dialog::render_dialog_with(
+        frame,
+        area,
+        spec,
+        visible_rows.saturating_add(2),
+        |frame, body| render_body(frame, body, model, palette, &commands),
     );
-    render_query(frame, query_area, model, palette);
+}
 
-    if show_hints {
-        let hints = Rect::new(
-            stack.x,
-            stack.y.saturating_add(card.height).saturating_add(1),
-            stack.width,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("up/down", Style::new().fg(TEXT)),
-                Span::styled(" select   ", Style::new().fg(MUTED)),
-                Span::styled("enter", Style::new().fg(TEXT)),
-                Span::styled(" run   ", Style::new().fg(MUTED)),
-                Span::styled("esc", Style::new().fg(TEXT)),
-                Span::styled(" close", Style::new().fg(MUTED)),
-            ])),
-            hints,
-        );
+/// Renders the command rows and the query line inside the dialog body.
+fn render_body(
+    frame: &mut Frame<'_>,
+    body: Rect,
+    model: &AppModel,
+    palette: &CommandPalette,
+    commands: &[&CommandSpec],
+) {
+    if body.width == 0 || body.height == 0 {
+        return;
     }
+
+    let query_y = body.y + body.height - 1;
+    let capacity = usize::from(body.height.saturating_sub(2));
+    render_rows(
+        frame,
+        Rect::new(body.x, body.y, body.width, body.height.saturating_sub(2)),
+        capacity,
+        model,
+        palette,
+        commands,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("/", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                palette.query.clone(),
+                Style::new().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .style(Style::new().bg(SURFACE)),
+        Rect::new(body.x, query_y, body.width, 1),
+    );
 }
 
 /// Renders the command rows, scrolled around the selected command.
 fn render_rows(
     frame: &mut Frame<'_>,
-    card: Rect,
-    capacity: u16,
+    area: Rect,
+    capacity: usize,
     model: &AppModel,
     palette: &CommandPalette,
     commands: &[&CommandSpec],
 ) {
-    if capacity == 0 {
+    if area.width == 0 || area.height == 0 || capacity == 0 {
         return;
     }
 
     if commands.is_empty() {
-        let row = Rect::new(card.x, card.y, card.width, 1);
         frame.render_widget(
             Paragraph::new("  No matching commands").style(Style::new().bg(SURFACE).fg(MUTED)),
-            row,
+            Rect::new(area.x, area.y, area.width, 1),
         );
         return;
     }
 
-    let capacity = usize::from(capacity);
     let selected_index = palette
         .selected
         .and_then(|selected| commands.iter().position(|command| command.id == selected))
@@ -118,10 +129,10 @@ fn render_rows(
             _ => Style::new().bg(SURFACE).fg(TEXT),
         };
         let row = Rect::new(
-            card.x,
-            card.y
+            area.x,
+            area.y
                 .saturating_add(u16::try_from(row_index).unwrap_or(u16::MAX)),
-            card.width,
+            area.width,
             1,
         );
         let line = if row.width >= 32 {
@@ -139,36 +150,5 @@ fn render_rows(
             ))
         };
         frame.render_widget(Paragraph::new(line).style(row_style), row);
-    }
-}
-
-/// Renders the query line and status row at the bottom of the palette.
-fn render_query(frame: &mut Frame<'_>, area: Rect, model: &AppModel, palette: &CommandPalette) {
-    if area.height == 0 {
-        return;
-    }
-
-    render_focus_rail(frame, area);
-    let inner = inset_surface(area, 0);
-    frame.render_widget(
-        Paragraph::new(format!("/{}", palette.query)).style(
-            Style::new()
-                .bg(SURFACE)
-                .fg(TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-
-    if area.height >= 3 {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Lanweave", Style::new().fg(ACCENT)),
-                Span::styled("  /  ", Style::new().fg(MUTED)),
-                Span::styled(status_text(model.state()), Style::new().fg(MUTED)),
-            ]))
-            .style(Style::new().bg(SURFACE)),
-            Rect::new(inner.x, inner.y + 2, inner.width, 1),
-        );
     }
 }

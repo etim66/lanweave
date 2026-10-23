@@ -37,18 +37,12 @@ pub(super) fn render(
         Span::styled("left/right", Style::new().fg(TEXT)),
         Span::styled(" choose   ", Style::new().fg(MUTED)),
         Span::styled("enter", Style::new().fg(TEXT)),
-        Span::styled(" select   ", Style::new().fg(MUTED)),
-        Span::styled("esc", Style::new().fg(TEXT)),
-        Span::styled(" reject", Style::new().fg(MUTED)),
+        Span::styled(" select", Style::new().fg(MUTED)),
     ]);
 
-    dialog::render_dialog(
-        frame,
-        area,
-        "Pairing request",
-        ACCENT,
-        body,
-        &buttons,
-        Some(hints),
-    );
+    let spec = dialog::DialogSpec::new("Pairing request", ACCENT)
+        .header_hint("esc")
+        .buttons(&buttons)
+        .footer_hint(hints);
+    dialog::render_dialog(frame, area, spec, body);
 }

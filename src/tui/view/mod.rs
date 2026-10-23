@@ -103,7 +103,7 @@ mod tests {
 
     use super::chrome;
     use super::render;
-    use super::theme::{BACKGROUND, HIGHLIGHT, SURFACE};
+    use super::theme::{BACKGROUND, HIGHLIGHT, SURFACE, SURFACE_FOOTER};
     use crate::app::action::{DeviceId, KeyInput, PairingPeer, UserAction};
     use crate::app::event::AppEvent;
     use crate::app::failure::FailureKind;
@@ -273,7 +273,13 @@ mod tests {
         assert!(output.contains("v0.2.0 is available"));
         assert!(output.contains("Update"));
         assert!(output.contains("Cancel"));
-        assert_button_margins(&output, "The new version runs after a restart.", "Cancel");
+        assert!(output.contains("esc"));
+        assert_dialog_footer(&output, "The new version runs after a restart.", "Cancel");
+        let backgrounds = render_backgrounds_with_ui(&browsing, &available, 80, 24);
+        assert!(
+            backgrounds.contains(&SURFACE_FOOTER),
+            "the dialog footer should use its own surface"
+        );
 
         // A live session is warned that the restart will end it.
         let session = AppModel::for_test(AppState::SessionIdle);
@@ -289,9 +295,15 @@ mod tests {
             new: "0.2.0".to_owned(),
         });
         let output = render_with_ui(&browsing, &installed, 80, 24);
-        assert!(output.contains("Updated to v0.2.0"));
+        assert!(output.contains("Update complete"));
+        assert!(output.contains("Lanweave v0.2.0 is installed"));
         assert!(output.contains("Quit now"));
         assert!(output.contains("Later"));
+        assert_dialog_footer(
+            &output,
+            "Restart Lanweave to use the new version.",
+            "Quit now",
+        );
 
         let not_managed = with_phase(UpdatePhase::NotManaged);
         let output = render_with_ui(&browsing, &not_managed, 80, 24);
@@ -356,7 +368,7 @@ mod tests {
         assert!(output.contains("Accept"));
         assert!(output.contains("Reject"));
         assert!(output.contains("left/right"));
-        assert_button_margins(&output, "Only accept", "Reject");
+        assert_dialog_footer(&output, "Only accept", "Reject");
         assert!(!render_with_ui(&prompt, &ui, 20, 4).is_empty());
 
         // The responder displays the code grouped in the large digit font.
@@ -596,7 +608,7 @@ mod tests {
         assert!(output.contains("2.0 KiB"));
         assert!(output.contains("From peer"));
         assert!(output.contains("Save to:"));
-        assert_button_margins(&output, "Save to:", "Reject");
+        assert_dialog_footer(&output, "Save to:", "Reject");
 
         // Tiny terminals fall back to a single count line.
         let tiny = render_with_ui(&model, &ui, 30, 4);
@@ -618,7 +630,7 @@ mod tests {
         let tall = render_with_ui(&model, &error_ui, 80, 10);
         assert!(tall.contains("Enter an existing directory"));
         assert!(tall.contains("Save to:"));
-        assert_button_margins(&tall, "Enter an existing directory", "Accept");
+        assert_dialog_footer(&tall, "Enter an existing directory", "Accept");
     }
 
     #[test]
@@ -883,6 +895,33 @@ mod tests {
 
     fn render_to_string(model: &AppModel, width: u16, height: u16) -> String {
         render_with_ui(model, &UiState::default(), width, height)
+    }
+
+    /// Asserts that a dialog body appears before a footer button, with a
+    /// divider above the footer and the card border below it.
+    fn assert_dialog_footer(output: &str, content: &str, button: &str) {
+        let lines: Vec<&str> = output.lines().collect();
+        let content_y = lines
+            .iter()
+            .position(|line| line.contains(content))
+            .unwrap_or_else(|| panic!("missing content `{content}`: {output}"));
+        let button_y = lines
+            .iter()
+            .position(|line| line.contains(button))
+            .unwrap_or_else(|| panic!("missing button `{button}`: {output}"));
+
+        assert!(
+            button_y > content_y + 1,
+            "the footer must follow the body: {output}"
+        );
+        assert!(
+            lines[button_y - 1].contains('─'),
+            "a divider must separate the body and footer: {output}"
+        );
+        assert!(
+            lines[button_y + 1].contains('╰'),
+            "the footer must sit inside the card border: {output}"
+        );
     }
 
     /// Asserts blank rows above and below the focused action row, with

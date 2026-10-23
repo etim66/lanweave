@@ -2,16 +2,15 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::interaction::{DialogFocus, TransferReviewInput};
 use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
 use super::dialog::{self, Button};
-use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
+use super::layout::scroll_window;
 use super::presenter::format_size;
-use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, ERROR, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
 
 /// Renders the inbound transfer review: manifest, destination, and decision.
@@ -38,65 +37,6 @@ pub(super) fn render(
         return;
     }
 
-    let stack = centered_rect(area, surface_width(area), 16);
-    let show_hints = stack.height >= 6;
-    let card_height = stack.height.saturating_sub(if show_hints { 2 } else { 0 });
-    let card = Rect::new(stack.x, stack.y, stack.width, card_height);
-    frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), card);
-    render_focus_rail(frame, card);
-
-    let inner = inset_surface(card, 1);
-    if inner.width > 0 && inner.height >= 2 {
-        render_body(frame, inner, model, input);
-    }
-
-    if show_hints {
-        let hints = Rect::new(
-            stack.x,
-            stack.y.saturating_add(card.height).saturating_add(1),
-            stack.width,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("left/right", Style::new().fg(TEXT)),
-                Span::styled(" choose   ", Style::new().fg(MUTED)),
-                Span::styled("enter", Style::new().fg(TEXT)),
-                Span::styled(" select   ", Style::new().fg(MUTED)),
-                Span::styled("up/down", Style::new().fg(TEXT)),
-                Span::styled(" scroll   ", Style::new().fg(MUTED)),
-                Span::styled("esc", Style::new().fg(TEXT)),
-                Span::styled(" reject", Style::new().fg(MUTED)),
-            ])),
-            hints,
-        );
-    }
-}
-
-/// Renders the title, peer, manifest, destination, error, and decision buttons.
-fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &TransferReviewInput) {
-    let mut y = inner.y;
-    let bottom = inner.y + inner.height;
-    let bottom_margin = u16::from(inner.height >= 4).min(dialog::BUTTON_MARGIN);
-    let buttons_y = bottom.saturating_sub(1 + bottom_margin);
-    let content_bottom = buttons_y.saturating_sub(1);
-    // An error replaces the destination line when the card is short, but keeps
-    // its own row above the destination when there is room. The last content
-    // row stays one blank row above the buttons whenever space allows.
-    let error_rows = u16::from(input.error.is_some());
-    let (error_y, destination_y) = match (error_rows, inner.height) {
-        (1, height) if height >= 6 => (Some(content_bottom - 1), Some(content_bottom - 2)),
-        (1, height) if height >= 5 => (Some(content_bottom - 1), None),
-        (1, height) if height >= 3 => (Some(content_bottom), None),
-        (_, height) if height >= 5 => (None, Some(content_bottom - 1)),
-        (_, height) if height >= 3 => (None, Some(content_bottom)),
-        _ => (None, None),
-    };
-    let list_end = error_y
-        .or(destination_y)
-        .unwrap_or(content_bottom)
-        .min(content_bottom);
-
     let title = match model.transfer_proposal() {
         Some(proposal) => format!(
             "Incoming files  ({} · {})",
@@ -105,14 +45,48 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
         ),
         None => "Incoming files".to_owned(),
     };
-    render_panel_line(
-        frame,
-        Rect::new(inner.x, y, inner.width, 1),
-        Line::styled(title, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-    );
-    y += 1;
+    let hints = Line::from(vec![
+        Span::styled("left/right", Style::new().fg(TEXT)),
+        Span::styled(" choose   ", Style::new().fg(MUTED)),
+        Span::styled("up/down", Style::new().fg(TEXT)),
+        Span::styled(" scroll", Style::new().fg(MUTED)),
+    ]);
+    let buttons = [
+        Button::new("Accept", input.focus == DialogFocus::Accept),
+        Button::new("Reject", input.focus == DialogFocus::Reject),
+    ];
 
-    if y < list_end {
+    let spec = dialog::DialogSpec::new(&title, ACCENT)
+        .header_hint("esc")
+        .buttons(&buttons)
+        .footer_hint(hints);
+    dialog::render_dialog_with(frame, area, spec, 9, |frame, body| {
+        render_body(frame, body, model, input);
+    });
+}
+
+/// Renders the peer note, manifest, destination, and error inside the body.
+fn render_body(frame: &mut Frame<'_>, body: Rect, model: &AppModel, input: &TransferReviewInput) {
+    if body.width == 0 || body.height == 0 {
+        return;
+    }
+
+    let last_y = body.y + body.height - 1;
+    let (error_y, destination_y) = match (input.error.is_some(), body.height) {
+        // A one-row body still shows the error, which needs action, rather
+        // than spending its only row on the destination.
+        (true, 1) => (Some(body.y), None),
+        (true, _) => (Some(last_y.saturating_sub(1)), Some(last_y)),
+        (false, _) => (None, Some(last_y)),
+    };
+    let list_bottom = error_y
+        .or(destination_y)
+        .unwrap_or(body.y)
+        .saturating_sub(1);
+    let peer_y = body.y;
+    let list_y = peer_y.saturating_add(1);
+
+    if peer_y < list_bottom {
         let peer = model
             .transfer_proposal()
             .and_then(|proposal| proposal.peer())
@@ -120,16 +94,14 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
             .unwrap_or_else(|| "From the connected device — unverified".to_owned());
         render_panel_line(
             frame,
-            Rect::new(inner.x, y, inner.width, 1),
+            Rect::new(body.x, peer_y, body.width, 1),
             Line::styled(peer, Style::new().fg(WARNING)),
         );
-        y += 1;
     }
 
-    // The footer rows are reserved even when nothing else fits.
-    let capacity = usize::from(list_end.saturating_sub(y));
     if let Some(proposal) = model.transfer_proposal() {
         let files = proposal.files();
+        let capacity = usize::from(list_bottom.saturating_sub(list_y));
         let (start, cursor) = scroll_window(files.len(), input.scroll, capacity);
         for (offset, entry) in files.iter().skip(start).take(capacity).enumerate() {
             let index = start + offset;
@@ -168,16 +140,20 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
             }
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(inner.x, y, inner.width, 1),
+                Rect::new(
+                    body.x,
+                    list_y.saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
+                    body.width,
+                    1,
+                ),
             );
-            y += 1;
         }
     }
 
     if let (Some(error), Some(error_y)) = (input.error, error_y) {
         render_panel_line(
             frame,
-            Rect::new(inner.x, error_y, inner.width, 1),
+            Rect::new(body.x, error_y, body.width, 1),
             Line::styled(error, Style::new().fg(ERROR)),
         );
     }
@@ -185,7 +161,7 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
     if let Some(destination_y) = destination_y {
         render_panel_line(
             frame,
-            Rect::new(inner.x, destination_y, inner.width, 1),
+            Rect::new(body.x, destination_y, body.width, 1),
             Line::from(vec![
                 Span::styled(
                     "Save to: ",
@@ -195,19 +171,9 @@ fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &Tra
             ]),
         );
     }
-
-    let buttons = [
-        Button::new("Accept", input.focus == DialogFocus::Accept),
-        Button::new("Reject", input.focus == DialogFocus::Reject),
-    ];
-    dialog::render_buttons(
-        frame,
-        Rect::new(inner.x, buttons_y, inner.width, 1),
-        &buttons,
-    );
 }
 
-/// Renders one background-filled line inside the review card.
+/// Renders one background-filled line inside the review body.
 fn render_panel_line(frame: &mut Frame<'_>, area: Rect, line: Line<'_>) {
     frame.render_widget(Paragraph::new(line).style(Style::new().bg(SURFACE)), area);
 }

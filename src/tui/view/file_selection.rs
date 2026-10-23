@@ -2,15 +2,15 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::interaction::FileSelectionInput;
 use crate::app::model::AppModel;
 use crate::discovery::escape_display;
 
-use super::layout::{centered_rect, inset_surface, scroll_window, surface_width};
+use super::dialog;
+use super::layout::scroll_window;
 use super::presenter::format_size;
-use super::render_focus_rail;
 use super::theme::{ACCENT, BACKGROUND, ERROR, HIGHLIGHT, MUTED, SURFACE, TEXT, WARNING};
 
 /// Renders the local file review card: pending input, issues, files, and send.
@@ -32,56 +32,36 @@ pub(super) fn render(
         return;
     }
 
-    let stack = centered_rect(area, surface_width(area), 16);
-    let show_hints = stack.height >= 6;
-    let card_height = stack.height.saturating_sub(if show_hints { 2 } else { 0 });
-    let card = Rect::new(stack.x, stack.y, stack.width, card_height);
-    frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), card);
-    render_focus_rail(frame, card);
-
-    let inner = inset_surface(card, 1);
-    if inner.width > 0 && inner.height >= 2 {
-        render_body(frame, inner, model, input);
-    }
-
-    if show_hints {
-        let hints = Rect::new(
-            stack.x,
-            stack.y.saturating_add(card.height).saturating_add(1),
-            stack.width,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("enter", Style::new().fg(TEXT)),
-                Span::styled(" add / send   ", Style::new().fg(MUTED)),
-                Span::styled("up/down", Style::new().fg(TEXT)),
-                Span::styled(" select   ", Style::new().fg(MUTED)),
-                Span::styled("backspace", Style::new().fg(TEXT)),
-                Span::styled(" remove   ", Style::new().fg(MUTED)),
-                Span::styled("esc", Style::new().fg(TEXT)),
-                Span::styled(" close", Style::new().fg(MUTED)),
-            ])),
-            hints,
-        );
-    }
-}
-
-/// Renders the title, input line, issues, list, and status inside the card.
-fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &FileSelectionInput) {
-    let status_y = inner.y + inner.height - 1;
     let title = format!(
         "Review files  ({} · {})",
         input.selection.len(),
         format_size(input.selection.total_size())
     );
-    render_panel_line(
-        frame,
-        Rect::new(inner.x, inner.y, inner.width, 1),
-        Line::styled(title, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-    );
+    let hints = Line::from(vec![
+        Span::styled("enter", Style::new().fg(TEXT)),
+        Span::styled(" add / send   ", Style::new().fg(MUTED)),
+        Span::styled("up/down", Style::new().fg(TEXT)),
+        Span::styled(" select   ", Style::new().fg(MUTED)),
+        Span::styled("backspace", Style::new().fg(TEXT)),
+        Span::styled(" remove", Style::new().fg(MUTED)),
+    ]);
 
-    let input_y = inner.y + 1;
+    let spec = dialog::DialogSpec::new(&title, ACCENT)
+        .header_hint("esc")
+        .footer_hint(hints);
+    dialog::render_dialog_with(frame, area, spec, 9, |frame, body| {
+        render_body(frame, body, model, input);
+    });
+}
+
+/// Renders the input line, issues, list, and status inside the dialog body.
+fn render_body(frame: &mut Frame<'_>, inner: Rect, model: &AppModel, input: &FileSelectionInput) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let status_y = inner.y + inner.height - 1;
+
+    let input_y = inner.y;
     if input_y < status_y {
         render_panel_line(
             frame,

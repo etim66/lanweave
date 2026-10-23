@@ -2,20 +2,20 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 use crate::app::command_palette::{CommandAvailability, registry};
 use crate::app::model::AppModel;
 
-use super::layout::{centered_rect, inset_surface, surface_width};
-use super::render_focus_rail;
-use super::theme::{ACCENT, MUTED, SURFACE, TEXT};
+use super::dialog;
+use super::layout::surface_width;
+use super::theme::{ACCENT, MUTED, TEXT};
 
-/// Renders the help overlay with keyboard hints and command availability.
+/// Renders the help dialog with keyboard hints and command availability.
 ///
 /// Falls back to a bare "Help" line on very small terminals.
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    if area.width < 8 || area.height < 3 {
+    if area.width < 12 || area.height < 5 {
         frame.render_widget(
             Paragraph::new("Help")
                 .alignment(Alignment::Center)
@@ -25,19 +25,8 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         return;
     }
 
-    let desired_height = u16::try_from(registry().len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(6);
-    let surface = centered_rect(area, surface_width(area), desired_height);
-    frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), surface);
-    render_focus_rail(frame, surface);
-
-    let narrow = surface.width < 50;
+    let narrow = surface_width(area) < 56;
     let mut lines = vec![
-        Line::styled(
-            "Keyboard & commands",
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
         Line::styled(
             "Type / to filter commands, then press Enter to run one.",
             Style::new().fg(MUTED),
@@ -69,21 +58,16 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             ]));
         }
     }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("esc", Style::new().fg(TEXT)),
-        Span::styled(" close   ", Style::new().fg(MUTED)),
+
+    let hints = Line::from(vec![
         Span::styled("/", Style::new().fg(TEXT)),
         Span::styled(" commands   ", Style::new().fg(MUTED)),
         Span::styled("q", Style::new().fg(TEXT)),
         Span::styled(" quit", Style::new().fg(MUTED)),
-    ]));
+    ]);
 
-    let inner = inset_surface(surface, 1);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::new().bg(SURFACE))
-            .wrap(Wrap { trim: true }),
-        inner,
-    );
+    let spec = dialog::DialogSpec::new("Keyboard & commands", ACCENT)
+        .header_hint("esc")
+        .footer_hint(hints);
+    dialog::render_dialog(frame, area, spec, lines);
 }
