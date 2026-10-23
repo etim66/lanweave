@@ -19,14 +19,15 @@ startup check is silent and changes nothing.
    notice stays until that version is installed or the running version becomes
    current.
 2. `/update` opens a dialog and checks the latest release on GitHub.
-3. If the running version is current, the dialog says so and closes.
+3. If the running version is current, the dialog says so and offers **OK**.
 4. If a newer version exists, the dialog shows both versions and asks for
    confirmation. **Cancel** or Escape changes nothing.
 5. **Update** downloads the release installer and runs it against the original
-   install directory. The terminal UI shows an installing note until it
-   finishes.
-6. On success the dialog offers **Quit now** or **Later**. Quitting follows the
-   normal shutdown path and restores the terminal; the next launch uses the new
+   install directory. The dialog switches to an **Updating Lanweave** state
+   until the installer finishes.
+6. On success the dialog changes to **Update complete**, names the installed
+   version, and offers **Quit now** or **Later**. Quitting follows the normal
+   shutdown path and restores the terminal; the next launch uses the new
    version.
 
 The check and the install use GitHub only. There is no Lanweave update server:
@@ -82,8 +83,9 @@ is never written to disk.
   new copy before replacing the old one, and Windows keeps a
   `lanweave.exe.previous.exe` copy only long enough to delete it on the next
   launch.
-- If the dialog is closed by a required prompt while a check or install is
-  running, the result is dropped; running `/update` again restarts the flow.
+- If a required pairing or transfer prompt takes the screen while a check or
+  install is running, the update result waits and is shown as soon as that
+  prompt closes. A completed install is never silently dropped.
 
 ## Uninstalling
 

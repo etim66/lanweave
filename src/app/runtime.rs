@@ -635,7 +635,9 @@ mod tests {
                 current: "0.1.0".to_owned(),
                 new: "0.2.0".to_owned(),
             }),
-            AppEvent::User(UserAction::ApplyUpdate),
+            // Drive the install through the key path so a dialog that is
+            // dropped before the effect runs is caught here.
+            AppEvent::KeyInput(KeyInput::Enter),
             AppEvent::UpdateApplied(Ok("0.2.0".to_owned())),
         ] {
             event_sender.send(event).await.unwrap();

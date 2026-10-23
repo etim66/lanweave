@@ -271,6 +271,8 @@ pub(crate) struct UiState {
     overlay: Option<Overlay>,
     /// Newer release found by a check, shown as a home-screen notice.
     update_available: Option<String>,
+    /// An install result that arrived while a required prompt owned the screen.
+    pending_update_result: Option<Result<String, String>>,
     device_selection: Option<super::action::DeviceId>,
     /// Scroll position of the active-transfer file list.
     transfer_scroll: FileListScroll,
@@ -292,6 +294,7 @@ impl UiState {
         Self {
             overlay: Some(overlay),
             update_available: None,
+            pending_update_result: None,
             device_selection: None,
             transfer_scroll: FileListScroll::FOLLOWING,
             summary_scroll: 0,
@@ -331,6 +334,7 @@ impl UiState {
     /// Closes any open overlay.
     pub(super) fn clear(&mut self) {
         self.overlay = None;
+        self.pending_update_result = None;
     }
 }
 
@@ -584,6 +588,12 @@ pub(crate) fn apply_key_input(
                 _ => None,
             };
             if let Some(action) = decision {
+                // ApplyUpdate needs the mounted dialog so the runtime can move
+                // it into the installing phase. Dismiss actions leave it
+                // closed; Quit is followed by the normal shutdown clear.
+                if matches!(action, UserAction::ApplyUpdate) {
+                    ui.overlay = Some(Overlay::Update(update));
+                }
                 return Some(action);
             }
             ui.overlay = Some(Overlay::Update(update));
@@ -795,22 +805,53 @@ pub(crate) fn apply_update_check(ui: &mut UiState, check: UpdateCheck) {
 /// Applies a finished update to the home notice and the open dialog.
 ///
 /// A successful install clears the offer; a failure leaves it in place. The
-/// dialog result is dropped when the dialog closed or is no longer installing.
+/// result is kept while a required prompt owns the screen and shown as soon as
+/// that prompt gives the display back, so a completed install is never silent.
 pub(crate) fn apply_update_result(ui: &mut UiState, result: Result<String, String>) {
     if result.is_ok() {
         ui.update_available = None;
     }
-    let Some(Overlay::Update(update)) = ui.overlay.as_mut() else {
-        return;
-    };
-    if !matches!(update.phase, UpdatePhase::Installing { .. }) {
+
+    if has_required_prompt(ui) {
+        ui.pending_update_result = Some(result);
         return;
     }
-    update.phase = match result {
+
+    if let Some(Overlay::Update(update)) = ui.overlay.as_mut()
+        && matches!(update.phase, UpdatePhase::Installing { .. })
+    {
+        update.phase = update_result_phase(result);
+        update.focus = DialogFocus::Accept;
+        return;
+    }
+
+    // The dialog was replaced while the installer ran. Reopen it with the
+    // result instead of dropping the only completion notice.
+    ui.overlay = Some(update_result_overlay(result));
+}
+
+/// Returns whether a required prompt currently owns the screen.
+fn has_required_prompt(ui: &UiState) -> bool {
+    matches!(
+        ui.overlay,
+        Some(Overlay::PairingPrompt(_) | Overlay::PairingCode(_) | Overlay::TransferReview(_))
+    )
+}
+
+/// Maps an install result to the phase shown in the update dialog.
+fn update_result_phase(result: Result<String, String>) -> UpdatePhase {
+    match result {
         Ok(new) => UpdatePhase::Installed { new },
         Err(message) => UpdatePhase::Failed { message },
-    };
-    update.focus = DialogFocus::Accept;
+    }
+}
+
+/// Builds a fresh update overlay for a result that must be shown immediately.
+fn update_result_overlay(result: Result<String, String>) -> Overlay {
+    Overlay::Update(UpdateInput {
+        phase: update_result_phase(result),
+        focus: DialogFocus::Accept,
+    })
 }
 
 /// Applies an already resolved action to the UI state.
@@ -917,6 +958,16 @@ pub(crate) fn reconcile(model: &AppModel, ui: &mut UiState) {
         && !model.capabilities().can_review_files
     {
         ui.overlay = None;
+    }
+
+    // A finished install waits for any required prompt to finish, then takes
+    // the screen back so the user always sees the completion notice.
+    if let Some(result) = ui.pending_update_result.take() {
+        if has_required_prompt(ui) {
+            ui.pending_update_result = Some(result);
+        } else {
+            ui.overlay = Some(update_result_overlay(result));
+        }
     }
 
     if let Some(selected) = ui.device_selection {
@@ -1124,8 +1175,8 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{
-        DialogFocus, FileSelectionInput, MAX_DESTINATION_INPUT_BYTES, Overlay, UiState,
-        UpdatePhase, apply_key_input, apply_paste, apply_review, apply_update_check,
+        DialogFocus, FileSelectionInput, MAX_DESTINATION_INPUT_BYTES, Overlay, PairingPromptInput,
+        UiState, UpdatePhase, apply_key_input, apply_paste, apply_review, apply_update_check,
         apply_update_result, apply_user_action, reconcile, take_review_work,
     };
     use crate::app::action::{DirectAddressError, DirectEndpoint, KeyInput, UserAction};
@@ -2087,8 +2138,22 @@ mod tests {
             }
         );
 
-        // Accepting moves the dialog into its installing phase and leaves the
-        // install effect to the model.
+        // Pressing Enter keeps the dialog mounted and asks the model to
+        // install; the UI turns it into the installing phase immediately.
+        assert_eq!(
+            apply_key_input(&model, &mut ui, KeyInput::Enter),
+            Some(UserAction::ApplyUpdate)
+        );
+        let Some(Overlay::Update(update)) = ui.overlay() else {
+            panic!("the update dialog must stay mounted for the install");
+        };
+        assert_eq!(
+            update.phase,
+            UpdatePhase::Available {
+                current: "0.1.0".to_owned(),
+                new: "0.2.0".to_owned(),
+            }
+        );
         assert!(!apply_user_action(&model, &mut ui, UserAction::ApplyUpdate));
         let Some(Overlay::Update(update)) = ui.overlay() else {
             panic!("the update dialog must stay open");
@@ -2119,6 +2184,43 @@ mod tests {
             Some(UserAction::DismissUpdate)
         );
         assert!(ui.overlay().is_none());
+    }
+
+    #[test]
+    fn a_finished_install_reopens_its_dialog_and_waits_for_required_prompts() {
+        let mut ui = UiState::default();
+
+        // The dialog was replaced while the installer ran; the result still
+        // reopens with the completion phase.
+        apply_update_result(&mut ui, Ok("0.2.0".to_owned()));
+        let Some(Overlay::Update(update)) = ui.overlay() else {
+            panic!("the completion dialog must reopen");
+        };
+        assert_eq!(
+            update.phase,
+            UpdatePhase::Installed {
+                new: "0.2.0".to_owned(),
+            }
+        );
+
+        // A required prompt keeps the screen, and the result appears once the
+        // prompt is gone.
+        ui.overlay = Some(Overlay::PairingPrompt(PairingPromptInput::default()));
+        apply_update_result(&mut ui, Ok("0.2.1".to_owned()));
+        assert!(matches!(ui.overlay(), Some(Overlay::PairingPrompt(_))));
+        assert!(ui.pending_update_result.is_some());
+
+        ui.overlay = None;
+        reconcile(&AppModel::for_test(AppState::Home), &mut ui);
+        let Some(Overlay::Update(update)) = ui.overlay() else {
+            panic!("the deferred completion dialog must open");
+        };
+        assert_eq!(
+            update.phase,
+            UpdatePhase::Installed {
+                new: "0.2.1".to_owned(),
+            }
+        );
     }
 
     #[test]
