@@ -1,6 +1,6 @@
 # Security
 
-> **Experimental:** Lanweave has not been implemented or audited. It must not be described as secure or production-ready.
+> **Experimental:** Lanweave is incomplete and has not been security audited. It must not be described as secure or production-ready.
 
 ## Trust Boundary
 

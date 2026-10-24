@@ -2,7 +2,7 @@
 
 ## Status
 
-Lanweave is currently a work in progress. The application is a Rust terminal user interface for local file transfer. Discovery, networking, security, file transfer, and the TUI are being implemented.
+Lanweave is a work in progress. The application is a Rust terminal user interface for local file transfer. The TUI, discovery, pairing, transport, and transfer flows are implemented; hardening, cross-platform packaging, and security review remain.
 
 ## Product Model
 
@@ -60,7 +60,7 @@ Pairing prompts and transfer approval prompts also have shorter local deadlines 
 
 ## Non-Goals
 
-The MVP excludes directories, resume, parallel files, compression, overwrite or rename negotiation, trusted devices, automatic acceptance, QUIC, mobile clients, and graphical interfaces. Local copy naming for occupied destination names is automatic; it is not a remote rename option. A TUI is required and is not considered a graphical interface.
+The MVP excludes remote directory browsing, resume, parallel files, on-the-fly compression negotiation, overwrite or rename negotiation, trusted devices, automatic acceptance, QUIC, mobile clients, and graphical interfaces. Folders are sent only as zip archives; local copy naming for occupied destination names is automatic and is not a remote rename option. A TUI is required and is not considered a graphical interface.
 
 Lanweave does not provide anonymity, protect a compromised computer, make received content safe to open, or guarantee connectivity on networks that block peer traffic.
 

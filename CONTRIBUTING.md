@@ -6,15 +6,22 @@ implemented or audited.
 
 ## Local Setup
 
-Install stable Rust at or above the MSRV declared in `Cargo.toml`. Run:
+Install stable Rust at or above the MSRV declared in `Cargo.toml`. Common
+development commands:
 
 ```sh
-make check
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all --locked
+cargo run --locked
+cargo audit
+cargo deny check
 ```
 
-This verifies formatting, Clippy with warnings denied, and all tests using the
-locked dependency graph. Use `make ci` before a release-oriented change to also
-run dependency policy and advisory checks.
+Run `make check` for the formatting, lint, and test gate used during normal
+development. Run `make ci` before a release-oriented change to also run
+dependency policy and advisory checks. The CI workflow at
+`.github/workflows/ci.yml` runs the same checks on Linux, macOS, and Windows.
 
 ## Module Guide
 
