@@ -29,8 +29,8 @@ by `make dist-tools` and CI.
    ```sh
    git checkout master
    git pull
-   git tag v0.2.1
-   git push origin v0.2.1
+   git tag v0.2.2
+   git push origin v0.2.2
    ```
 
 3. The `release` workflow runs plan, build, host, and announce:
